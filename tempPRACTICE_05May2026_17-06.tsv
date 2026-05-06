@@ -1,0 +1,4 @@
+trialnum	subject	conditionLabel	trajectoryCenterXDeg	trajectoryCenterYDeg	basicShape	numObjects	speed	initialDirRing0	orderCorrect	trialDurTotal	numTargets	whichIsTargetEachRing0	ringToQuery	direction0	respAdj0	rev0_0	rev0_1	rev0_2	rev0_3	rev0_4	rev0_5	rev0_6	rev0_7	rev0_8	timingBlips
+0	temp	center	0.0	0.0	circle	2	1.8	-1	3 	 4.906660426781959 	 1 	 0.0	0	-1	0.0	2.9017 	3.5281 	4.7376 	6.5132 	-999	-999	-999	-999	-999	267
+1	temp	near	5.0	0.0	circle	2	1.8	1	3 	 4.8547097165142095 	 1 	 0.0	0	1	-0.0	2.3084 	3.5317 	4.6548 	5.3431 	-999	-999	-999	-999	-999	285
+2	temp	far	10.0	0.0	circle	2	2.0	-1	3 	 4.006511912702775 	 1 	 0.0	0	-1	-0.0	2.2511 	3.9332 	5.5794 	-999	-999	-999	-999	-999	-999	240
