@@ -26,6 +26,7 @@ from psychopy import visual, core, event, sound, gui, monitors
 import numpy as np, random, time, os
 from math import pi, cos, sin
 import itertools
+import sys
 
 
 # -------------------- Experiment parameters (match practice files) --------------------
@@ -263,7 +264,7 @@ def draw_trajectory(myWin, basicShape, radius_deg, cx, cy, num_points=120):
 		lineWidth=2,
 		closeShape=True
 	)
-	trajectory_line.draw()
+	# trajectory_line.draw()
 
 
 # -------------------- Trial generation / counterbalancing --------------------
@@ -345,6 +346,18 @@ if __name__ == '__main__':
 	run_checks_and_report(trials)
 	parts_to_run = [part.strip().lower() for part in os.environ.get('MOT_PARTS', 'part1,part2,part3').split(',') if part.strip()]
 
+	# -------------------- Data file setup --------------------
+	subject = 'temp'
+	session = 1
+	timeAndDateStr = time.strftime("%d%b%Y_%H-%M", time.localtime())
+	if os.path.isdir('.'+os.sep+'dataRaw'):
+		dataDir='dataRaw'
+	else:
+		print('"dataRaw" directory does not exist, so saving data in present working directory')
+		dataDir='.'
+	datafileName = dataDir+'/'+subject+ '_' + str(session) + '_MOT_pilot_'+timeAndDateStr
+	dataFile = open(datafileName+'.tsv', 'w')
+
 	# -------------------- Full experiment run (display, timing, response collection) --------------------
 	# Minimal window setup (matches practice units)
 	try:
@@ -378,6 +391,9 @@ if __name__ == '__main__':
 	results = []
 	identicalBlobColor = np.array([1, -1, -1])
 	targetCueColor = np.array([1, 1, 1])
+
+	# Write header to TSV file
+	print('trialnum\tpart\tcondition\tspeed\tcorrect', file=dataFile)
 
 	def run_part(part_name, trial_list):
 		print(f"Running {part_name} with {len(trial_list)} trials")
@@ -568,9 +584,10 @@ if __name__ == '__main__':
 					else:
 						apply_visual_feedback(picked, False, x2, y2, blobStim2, fixation)
 
-			results.append({'part': part_name, 'condition': cond, 'speed': speed, 'correct': bool(correct)})
-
-	# Run parts sequentially
+			# Write trial result to data file
+			trialnum = len(results)
+			print(trialnum, part_name, cond, speed, int(correct), sep='\t', file=dataFile)
+			dataFile.flush()
 	def run_part1(trial_list):
 		# Enforce 2 objects per trial and run Part 1 (Off-Fixation Standard)
 		print('\n--- Starting Part 1: Off-Fixation Standard ---')
@@ -587,5 +604,7 @@ if __name__ == '__main__':
 	# Final summary
 	n_correct = sum(1 for r in results if r['correct'])
 	print('\nExperiment complete. Total correct:', n_correct, 'out of', len(results))
+	print('Results saved to:', datafileName+'.tsv')
+	dataFile.close()
 	myWin.close()
 
