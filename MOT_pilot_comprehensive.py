@@ -11,8 +11,8 @@ Parts:
 
 General rules enforced:
  - 2 objects per trial (1 target, 1 distractor)
- - Speeds: [1.0,1.5,1.7,1.9,2.0,2.2] rps, 4 repeats each = 24 trials/condition
- - 3 conditions/part = 72 trials/part, 216 total
+ - Speeds: [1.0,1.5,1.7,1.9,2.0,2.2] rps, 16 repeats each = 96 trials/condition
+ - 3 conditions/part = 288 trials/part, 864 total
  - Circular trajectories use radius 6 deg
  - Feedback sounds: correct / incorrect
 
@@ -41,7 +41,7 @@ trackVariableIntervMax = 2.5
 autoAdvance = os.environ.get('MOT_AUTO_ADVANCE', '0') == '1'
 
 speeds_base = [1.0, 1.5, 1.7, 1.9, 2.0, 2.2]  # rps
-repeats_per_speed = 4
+repeats_per_speed = 16
 
 # Sounds
 beep_correct = sound.Sound(value='C', secs=0.08)  # simple tone
@@ -309,11 +309,15 @@ def run_checks_and_report(trials_by_part):
 	print('\n=== MOT_pilot verification report ===')
 	print('Circular radii set to 6 deg:', circle_radius_ok)
 	for pname in counts:
-		print(f"{pname}: {counts[pname]} trials (expected 72)")
+		# compute expected based on unique conditions and speeds
+		unique_conds = set([t['condition'] for t in trials_by_part[pname]])
+		expected = len(unique_conds) * len(speeds_base) * repeats_per_speed
+		print(f"{pname}: {counts[pname]} trials (expected {expected})")
 		print('  speed distribution:', speed_counts[pname])
 
 	total_trials = sum(counts.values())
-	print('Total trials across 3 parts =', total_trials, '(expected 216)')
+	expected_total = sum([len(set([t['condition'] for t in trials_by_part[p]])) * len(speeds_base) * repeats_per_speed for p in trials_by_part])
+	print('Total trials across 3 parts =', total_trials, f'(expected {expected_total})')
 
 	print('\nFeedback sounds available: correct/inaccurate assigned')
 	print('beep_correct:', beep_correct)
@@ -322,10 +326,11 @@ def run_checks_and_report(trials_by_part):
 	# Quick assertions to flag any issue
 	issues = []
 	for pname in counts:
-		if counts[pname] != 72:
-			issues.append(f"{pname} has {counts[pname]} trials (expected 72)")
-		# ensure each speed appears repeats_per_speed * len(conditions) times per part
-	if total_trials != 216:
+		unique_conds = set([t['condition'] for t in trials_by_part[pname]])
+		expected = len(unique_conds) * len(speeds_base) * repeats_per_speed
+		if counts[pname] != expected:
+			issues.append(f"{pname} has {counts[pname]} trials (expected {expected})")
+	if total_trials != expected_total:
 		issues.append('Total trials mismatch')
 
 	if not circle_radius_ok:
