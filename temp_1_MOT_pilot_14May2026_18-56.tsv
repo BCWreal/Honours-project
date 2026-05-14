@@ -1,0 +1,6 @@
+trialnum	subject	session	part	condition	basicShape	numObjects	speed	initialAngle	initialOtherAngle	cueFrames	correct	trialDurTotal	numTargets	whichIsTarget	reversal_count	reversal_0	reversal_1	reversal_2	reversal_3	reversal_4	reversal_5	reversal_6	reversal_7	reversal_8	reversal_9
+0	temp	1	part1	centred	circle	2	2.2	4.5206	1.379	120	0	16.661	1	0	2	2.4626	4.1358	-999	-999	-999	-999	-999	-999	-999	-999
+1	temp	1	part1	centred	circle	2	1.9	2.0148	5.1564	120	0	15.427	1	0	2	2.1956	3.741	-999	-999	-999	-999	-999	-999	-999	-999
+2	temp	1	part1	centred	circle	2	1.9	0.8947	4.0363	120	1	9.499	1	0	2	1.8277	3.5917	-999	-999	-999	-999	-999	-999	-999	-999
+3	temp	1	part1	centred	circle	2	1.9	1.0803	4.2219	120	1	9.532	1	0	2	3.0672	4.1836	-999	-999	-999	-999	-999	-999	-999	-999
+4	temp	1	part1	far_displaced	circle	2	2.2	0.4631	3.6047	120	0	15.35	1	0	2	3.0835	4.3513	-999	-999	-999	-999	-999	-999	-999	-999

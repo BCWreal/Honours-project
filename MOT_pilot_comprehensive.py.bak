@@ -469,31 +469,31 @@ if __name__ == '__main__':
 					# When l=0 this reduces to fixed-speed circular motion.
 					dt = 1.0 / refreshRate
 					l = np.sqrt(cx * cx + cy * cy)
-					base_rps = speed
-					r = radii[0]
-
-					# Precompute trial-level debug values on first frame.
+                                                base_rps = speed
+                                                r = radii[0]
+					
+						# Precompute trial-level debug values on first frame.
 					if frameN == 0:
-						phi_samples = np.linspace(0, 2 * np.pi, 360, endpoint=False)
-						trial_rhos = rho_from_phi(phi_samples, l, r)
-						trial_phi_dots = phi_dot_log_eccentricity_base_speed(phi_samples, base_rps, l, r)
-						print(
-							f"DEBUG: Part 2 varying-speed trial {ti+1} | condition={cond} | "
-							f"base_rps={base_rps:.3f} | l={l:.3f} | r={r:.3f} | "
-							f"min_rho={np.min(trial_rhos):.6f} | max_rho={np.max(trial_rhos):.6f} | "
-							f"min_phi_dot={np.min(trial_phi_dots):.6f} | max_phi_dot={np.max(trial_phi_dots):.6f}"
-						)
-
+							phi_samples = np.linspace(0, 2 * np.pi, 360, endpoint=False)
+							trial_rhos = rho_from_phi(phi_samples, l, r)
+							trial_phi_dots = phi_dot_log_eccentricity_base_speed(phi_samples, base_rps, l, r)
+							print(
+								f"DEBUG: Part 2 varying-speed trial {ti+1} | condition={cond} | "
+								f"base_rps={base_rps:.3f} | l={l:.3f} | r={r:.3f} | "
+								f"min_rho={np.min(trial_rhos):.6f} | max_rho={np.max(trial_rhos):.6f} | "
+								f"min_phi_dot={np.min(trial_phi_dots):.6f} | max_phi_dot={np.max(trial_phi_dots):.6f}"
+							)
+					
 					# Update object 1 (target) independently
-					phi_dot_0 = phi_dot_log_eccentricity_base_speed(currPhi[0], base_rps, l, r)
-					currPhi[0] = (currPhi[0] + direction * phi_dot_0 * dt) % (2 * np.pi)
-
+						phi_dot_0 = phi_dot_log_eccentricity_base_speed(currPhi[0], base_rps, l, r)
+						currPhi[0] = (currPhi[0] + direction * phi_dot_0 * dt) % (2 * np.pi)
+					
 					# Update object 2 (distractor) independently
-					phi_dot_1 = phi_dot_log_eccentricity_base_speed(currPhi[1], base_rps, l, r)
-					currPhi[1] = (currPhi[1] + direction * phi_dot_1 * dt) % (2 * np.pi)
-
-					x1, y1 = circle_xy(r, currPhi[0], timeSec, base_rps, 0)
-					x2, y2 = circle_xy(r, currPhi[1], timeSec, base_rps, 0)
+						phi_dot_1 = phi_dot_log_eccentricity_base_speed(currPhi[1], base_rps, l, r)
+						currPhi[1] = (currPhi[1] + direction * phi_dot_1 * dt) % (2 * np.pi)
+					
+						x1, y1 = circle_xy(r, currPhi[0], timeSec, base_rps, 0)
+						x2, y2 = circle_xy(r, currPhi[1], timeSec, base_rps, 0)
 				else:
 					# Parts 1 & 3: Both objects move together at the same angular speed
 					angleStep = direction * speed * 2 * pi / refreshRate
