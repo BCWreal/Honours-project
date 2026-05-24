@@ -5,14 +5,15 @@ Three-part experiment scaffold derived from MOT Circular / practice files.
 COMPREHENSIVE VERSION with detailed results logging matching MOT Circular.py
 
 Parts:
- - Part 1: Off-Fixation Standard (circular trajectories)
- - Part 2: Varying Speed (uses same modulation approach as MOT_Varying_speed)
- - Part 3: Different Shapes (diamond, sine-circle, ellipse)
+ - Part 1: Off-Fixation Standard / Varying Speed block
+ - Part 2: Different Shapes (diamond, sine-circle, ellipse)
 
 General rules enforced:
  - 2 objects per trial (1 target, 1 distractor)
- - Speeds: [1.0,1.5,1.7,1.9,2.0,2.2] rps, 16 repeats each = 96 trials/condition
- - 3 conditions/part = 288 trials/part, 864 total
+ - Adaptive staircase on speed across a 1.0 to 2.2 rps range, 96 trials/condition
+ - Part 1: 5 conditions total = 480 trials
+ - Part 2: 3 conditions = 288 trials
+ - 768 total trials
  - Circular trajectories use radius 6 deg
  - Feedback sounds: correct / incorrect
 
@@ -21,11 +22,39 @@ Results logging includes: trial details, initial angles, reversal times, trial d
 
 from psychopy import prefs
 prefs.hardware['audioLib'] = ['pygame']
-from psychopy import visual, core, event, sound, gui, monitors
+from psychopy import visual, core, event, sound, gui, monitors, data
 import numpy as np, random, time, os
 from math import pi, cos, sin
 import itertools
 import sys
+from pathlib import Path
+import atexit
+
+# Ensure data directory exists to match earlier messages and avoid warnings
+data_dir = Path('dataRaw')
+if not data_dir.exists():
+	try:
+		data_dir.mkdir(parents=True, exist_ok=True)
+	except Exception:
+		pass
+
+# Ensure a default monitor is present so PsychoPy doesn't create a temporary one
+DEFAULT_MONITOR_NAME = 'default_monitor'
+if DEFAULT_MONITOR_NAME not in monitors.getAllMonitors():
+	try:
+		m = monitors.Monitor(DEFAULT_MONITOR_NAME)
+		# Best-effort defaults; adjust if you have a specific monitor
+		try:
+			m.setSizePix((1920, 1080))
+			m.setWidth(52)  # physical width in cm
+		except Exception:
+			pass
+		try:
+			m.save()
+		except Exception:
+			pass
+	except Exception:
+		pass
 
 
 # -------------------- Experiment parameters (match practice files) --------------------
@@ -38,10 +67,24 @@ refreshRate = 100.0
 trialDurMin = 2
 trackingExtraTime = 1.2
 trackVariableIntervMax = 2.5
-autoAdvance = os.environ.get('MOT_AUTO_ADVANCE', '0') == '1'
+autoAdvance = False
 
-speeds_base = [1.0, 1.5, 1.7, 1.9, 2.0, 2.2]  # rps
-repeats_per_speed = 16
+stair_nUp = 1
+stair_nDown = 3
+stair_stepSizes = [.3, .3, .2, .1, .1, .05]
+stair_start = 1.25
+stair_min = 1.0
+stair_max = 2.2
+stair_trials_per_condition = 96
+
+
+def stair_value_to_speed(stair_value):
+	"""Map the StairHandler value so speed increases when StairHandler steps down.
+
+	This makes the trial speed increase after 3 consecutive correct responses and
+	decrease immediately after an incorrect response.
+	"""
+	return stair_min + stair_max - stair_value
 
 # Sounds
 beep_correct = sound.Sound(value='C', secs=0.08)  # simple tone
@@ -50,10 +93,6 @@ beep_incorrect = sound.Sound(value='A', secs=0.12)
 timeTillReversalMin = 0.5
 timeTillReversalMax = 2.0
 badTimingCushion = 0.3
-part2_log_polar_V_base = 1.0  # Base speed in log-polar space; scaled by trial speed to match nominal rps
-part2_log_polar_ref_speed = 1.0  # Reference speed (rps) for which V_base was calibrated
-
-
 def get_reversal_times(trial_duration_sec):
 	reversal_times = []
 	this_reversal_dur = trackingExtraTime
@@ -98,7 +137,7 @@ def apply_visual_feedback(selected_idx, is_correct, x_pos, y_pos, blob_stim, fix
 	flash_color = [0, 1, 0] if is_correct else [1, -1, -1]  # green or red
 	flash_duration = 0.1  # seconds per flash
 	gap_duration = 0.1    # gap between flashes
-	
+
 	for flash_num in range(2):
 		blob_stim.setFillColor(flash_color, log=False)
 		blob_stim.setPos((x_pos, y_pos))
@@ -106,11 +145,38 @@ def apply_visual_feedback(selected_idx, is_correct, x_pos, y_pos, blob_stim, fix
 		blob_stim.draw()
 		myWin.flip()
 		core.wait(flash_duration)
-		
+
 		if flash_num == 0:
 			fix.draw()
 			myWin.flip()
 			core.wait(gap_duration)
+
+
+def apply_global_flash(is_correct, blobA, blobB, fix):
+	"""Flash both objects green (correct) or bright orange (incorrect) twice.
+
+	Parameters:
+	- is_correct: bool
+	- blobA/blobB: visual stimuli for the two objects
+	- fix: fixation stimulus to draw underneath
+	"""
+	if is_correct:
+		flash_col = (-1, 1, -1)  # green
+	else:
+		flash_col = (1, 0.5, -1)  # bright orange-ish
+	flash_duration = 0.12
+	gap_duration = 0.08
+	for i in range(2):
+		# set both blobs to flash color and draw
+		blobA.setFillColor(flash_col, log=False)
+		blobB.setFillColor(flash_col, log=False)
+		fix.draw()
+		# draw at their current positions (assume positions already set by caller)
+		blobA.draw(); blobB.draw()
+		myWin.flip()
+		core.wait(flash_duration)
+		# clear (draw fixation only) between flashes
+		fix.draw(); myWin.flip(); core.wait(gap_duration)
 
 
 def compute_mean_inv_rho(l, r, num_samples=360):
@@ -284,27 +350,79 @@ def draw_trajectory(myWin, basicShape, radius_deg, cx, cy, num_points=120):
 
 
 # -------------------- Trial generation / counterbalancing --------------------
-def make_trials_for_part(part_name, conditions):
-	# conditions: list of condition identifiers; for parts 1 & 2 these are fixation offsets (e.g., 'centred','near','far')
+def make_stair_trials(part_name, trial_specs):
 	trials = []
-	for cond in conditions:
-		for sp in speeds_base:
-			for rep in range(repeats_per_speed):
-				trials.append({'part': part_name, 'condition': cond, 'speed': sp})
+	for spec in trial_specs:
+		for rep in range(stair_trials_per_condition):
+			trial = {
+				'part': part_name,
+				'condition': spec['condition'],
+				'motionRule': spec.get('motionRule', 'standard'),
+				'stairKey': spec['stairKey'],
+			}
+			trials.append(trial)
 	random.shuffle(trials)
 	return trials
 
 
 def build_session():
-	# Define the three parts and their three conditions each
-	fixation_conditions = ['centred', 'near_displaced', 'far_displaced']
-	part1_trials = make_trials_for_part('Part1_OffFix_Standard', fixation_conditions)
-	part2_trials = make_trials_for_part('Part2_VaryingSpeed', fixation_conditions)
-	shape_conditions = ['diamond', 'sine_circle', 'ellipse']
-	part3_trials = make_trials_for_part('Part3_DiffShapes', shape_conditions)
+	# Every condition uses a staircase-driven base speed.
+	combined_trial_specs = [
+		{'condition': 'centred', 'motionRule': 'standard', 'stairKey': 'Part1|centred|standard'},
+		{'condition': 'near_displaced', 'motionRule': 'standard', 'stairKey': 'Part1|near_displaced|standard'},
+		{'condition': 'far_displaced', 'motionRule': 'standard', 'stairKey': 'Part1|far_displaced|standard'},
+		{'condition': 'near_displaced', 'motionRule': 'varying', 'stairKey': 'Part1|near_displaced|varying'},
+		{'condition': 'far_displaced', 'motionRule': 'varying', 'stairKey': 'Part1|far_displaced|varying'},
+	]
+	part12_trials = make_stair_trials('Part1', combined_trial_specs)
+	shape_trial_specs = [
+		{'condition': 'diamond', 'motionRule': 'shape', 'stairKey': 'Part2|diamond'},
+		{'condition': 'sine_circle', 'motionRule': 'shape', 'stairKey': 'Part2|sine_circle'},
+		{'condition': 'ellipse', 'motionRule': 'shape', 'stairKey': 'Part2|ellipse'},
+	]
+	part3_trials = make_stair_trials('Part2', shape_trial_specs)
 
 	# keep trials separate per part (they are run independently per instructions)
-	return {'part1': part1_trials, 'part2': part2_trials, 'part3': part3_trials}
+	return {'part1': part12_trials, 'part2': part3_trials}
+
+
+def build_varying_staircases():
+	staircases = {}
+	for part_name, trial_specs in [
+		('Part1', [
+			{'condition': 'centred', 'motionRule': 'standard', 'stairKey': 'Part1|centred|standard'},
+			{'condition': 'near_displaced', 'motionRule': 'standard', 'stairKey': 'Part1|near_displaced|standard'},
+			{'condition': 'far_displaced', 'motionRule': 'standard', 'stairKey': 'Part1|far_displaced|standard'},
+			{'condition': 'near_displaced', 'motionRule': 'varying', 'stairKey': 'Part1|near_displaced|varying'},
+			{'condition': 'far_displaced', 'motionRule': 'varying', 'stairKey': 'Part1|far_displaced|varying'},
+		]),
+		('Part2', [
+			{'condition': 'diamond', 'motionRule': 'shape', 'stairKey': 'Part2|diamond'},
+			{'condition': 'sine_circle', 'motionRule': 'shape', 'stairKey': 'Part2|sine_circle'},
+			{'condition': 'ellipse', 'motionRule': 'shape', 'stairKey': 'Part2|ellipse'},
+		]),
+	]:
+		for spec in trial_specs:
+			staircases[spec['stairKey']] = data.StairHandler(
+				startVal=stair_start,
+			stepType='lin',
+				stepSizes=stair_stepSizes,
+				minVal=stair_min,
+				maxVal=stair_max,
+				nUp=stair_nUp,
+				nDown=stair_nDown,
+				nTrials=stair_trials_per_condition,
+				extraInfo={'part': part_name, 'condition': spec['condition'], 'motionRule': spec['motionRule']}
+			)
+	return staircases
+
+
+def build_speed_staircases():
+	"""Create a StairHandler for every stairKey (per-part, per-condition, per-motionRule).
+	This is the canonical builder used by the run loop.
+	Delegates to build_varying_staircases for the current experiment spec.
+	"""
+	return build_varying_staircases()
 
 
 # -------------------- Minimal run loop for verification (non-optimized, non-graphical checks) --------------------
@@ -314,26 +432,43 @@ def run_checks_and_report(trials_by_part):
 
 	# Trial counts
 	counts = {k: len(v) for k, v in trials_by_part.items()}
+	expected_counts = {
+		('Part1', 'centred', 'standard'): stair_trials_per_condition,
+		('Part1', 'near_displaced', 'standard'): stair_trials_per_condition,
+		('Part1', 'far_displaced', 'standard'): stair_trials_per_condition,
+		('Part1', 'near_displaced', 'varying'): stair_trials_per_condition,
+		('Part1', 'far_displaced', 'varying'): stair_trials_per_condition,
+		('Part2', 'diamond', 'shape'): stair_trials_per_condition,
+		('Part2', 'sine_circle', 'shape'): stair_trials_per_condition,
+		('Part2', 'ellipse', 'shape'): stair_trials_per_condition,
+	}
 
 	# Counterbalancing: count speeds per part
 	speed_counts = {}
 	for pname, tlist in trials_by_part.items():
 		sc = {}
 		for t in tlist:
-			sc[t['speed']] = sc.get(t['speed'], 0) + 1
+			# Some trials are staircase-driven and don't have a concrete 'speed' yet.
+			# Count by numeric speed when present, otherwise by the staircase key.
+			if 'speed' in t:
+				key = t['speed']
+			else:
+				key = t.get('stairKey', 'staircase')
+			sc[key] = sc.get(key, 0) + 1
 		speed_counts[pname] = sc
 
 	print('\n=== MOT_pilot verification report ===')
 	print('Circular radii set to 6 deg:', circle_radius_ok)
 	for pname in counts:
-		# compute expected based on unique conditions and speeds
-		unique_conds = set([t['condition'] for t in trials_by_part[pname]])
-		expected = len(unique_conds) * len(speeds_base) * repeats_per_speed
+		# compute expected based on the condition+motionRule split in each part
+		unique_keys = set([(t.get('part'), t.get('condition'), t.get('motionRule', 'standard')) for t in trials_by_part[pname]])
+		expected = sum(expected_counts.get(key, 0) for key in unique_keys)
 		print(f"{pname}: {counts[pname]} trials (expected {expected})")
 		print('  speed distribution:', speed_counts[pname])
 
 	total_trials = sum(counts.values())
-	expected_total = sum([len(set([t['condition'] for t in trials_by_part[p]])) * len(speeds_base) * repeats_per_speed for p in trials_by_part])
+	# compute expected total using the staircase split above
+	expected_total = sum(expected_counts.values())
 	print('Total trials across 3 parts =', total_trials, f'(expected {expected_total})')
 
 	print('\nFeedback sounds available: correct/inaccurate assigned')
@@ -343,8 +478,8 @@ def run_checks_and_report(trials_by_part):
 	# Quick assertions to flag any issue
 	issues = []
 	for pname in counts:
-		unique_conds = set([t['condition'] for t in trials_by_part[pname]])
-		expected = len(unique_conds) * len(speeds_base) * repeats_per_speed
+		unique_keys = set([(t.get('part'), t.get('condition'), t.get('motionRule', 'standard')) for t in trials_by_part[pname]])
+		expected = sum(expected_counts.get(key, 0) for key in unique_keys)
 		if counts[pname] != expected:
 			issues.append(f"{pname} has {counts[pname]} trials (expected {expected})")
 	if total_trials != expected_total:
@@ -365,7 +500,7 @@ if __name__ == '__main__':
 	random.seed(int(time.time()))
 	trials = build_session()
 	run_checks_and_report(trials)
-	parts_to_run = [part.strip().lower() for part in os.environ.get('MOT_PARTS', 'part1,part2,part3').split(',') if part.strip()]
+	parts_to_run = [part.strip().lower() for part in os.environ.get('MOT_PARTS', 'part1,part2').split(',') if part.strip()]
 
 	# -------------------- Data file setup --------------------
 	subject = 'temp'
@@ -412,22 +547,46 @@ if __name__ == '__main__':
 	results = []
 	identicalBlobColor = np.array([1, -1, -1])
 	targetCueColor = np.array([1, 1, 1])
+	# distractor during cue interval (red), flash colors for feedback
+	distractorCueColor = np.array([1, -1, -1])
+	greenFlashColor = np.array([-1, 1, -1])
+	orangeFlashColor = np.array([1, 0.5, -1])
 	trialClock = core.Clock()
+	speed_staircases = build_speed_staircases()
 
 	# Write comprehensive header to TSV file (matching MOT Circular format)
-	header = 'trialnum\tsubject\tsession\tpart\tcondition\tbasicShape\tnumObjects\tspeed'
-	header += '\tinitialAngle\tinitialOtherAngle\tcueFrames\tcorrect\ttrialDurTotal\tnumTargets\twhichIsTarget'
-	header += '\treversal_count'
-	for i in range(10):  # space for up to 10 reversals
-		header += f'\treversal_{i}'
-	print(header, file=dataFile)
+	# Column order is explicit for downstream analysis
+	header_columns = [
+		'trialnum', 'subject', 'session', 'part', 'condition', 'basicShape', 'numObjects', 'speed', 'motionRule',
+		'initialAngle', 'initialOtherAngle', 'cueFrames', 'correct', 'trialDurTotal', 'numTargets', 'whichIsTarget',
+		'reversal_count'
+	]
+	# add reversal columns
+	for i in range(10):
+		header_columns.append(f'reversal_{i}')
+	header_line = '\t'.join(header_columns)
+	print(header_line, file=dataFile)
+
+	# Ensure data file and window get closed on exit
+	def _close_resources():
+		try:
+			dataFile.close()
+		except Exception:
+			pass
+		try:
+			if 'myWin' in globals() and myWin is not None:
+				myWin.close()
+		except Exception:
+			pass
+	atexit.register(_close_resources)
 
 	def run_part(part_name, trial_list):
 		print(f"Running {part_name} with {len(trial_list)} trials")
 		for ti, thisTrial in enumerate(trial_list):
 			# determine center
 			cond = thisTrial['condition']
-			if part_name in ('part1', 'part2'):
+			motion_rule = thisTrial.get('motionRule', 'standard')
+			if part_name == 'Part1':
 				if cond == 'centred':
 					cx = practice_trajectoryCenterXDeg[0]
 				elif cond == 'near_displaced':
@@ -436,12 +595,13 @@ if __name__ == '__main__':
 					cx = practice_trajectoryCenterXDeg[2]
 				cy = 0.0
 				basicShape = 'circle'
-			else:  # part3 shapes
+			else:  # Part2 shapes
 				cx = 0.0
 				cy = 0.0
 				basicShape = cond  # 'diamond','sine_circle','ellipse'
 
-			speed = thisTrial['speed']
+			stair_value = speed_staircases[thisTrial['stairKey']].next()
+			speed = stair_value_to_speed(stair_value)
 
 			# starting angles (two objects opposite)
 			currAngle = random.random() * 2 * pi
@@ -464,7 +624,7 @@ if __name__ == '__main__':
 			# frame loop
 			for frameN in range(trialDurFrames):
 				timeSec = frameN / refreshRate
-				if part_name == 'part2' and basicShape == 'circle':
+				if part_name == 'Part1' and basicShape == 'circle' and motion_rule == 'varying':
 					# Part 2: use the same eccentricity-based rule for centred and displaced conditions.
 					# When l=0 this reduces to fixed-speed circular motion.
 					dt = 1.0 / refreshRate
@@ -533,20 +693,33 @@ if __name__ == '__main__':
 
 				# draw
 				fixation.draw()
-				blobStim.setFillColor(identicalBlobColor, log=False)
-				blobStim2.setFillColor(identicalBlobColor, log=False)
-				blobStim.setLineColor(None, log=False)
-				blobStim2.setLineColor(None, log=False)
-				blobStim.setPos((x1, y1)); blobStim.draw()
-				blobStim2.setPos((x2, y2)); blobStim2.draw()
-
-				# draw cue at start of trial to indicate target
+				# During the cue interval show the target as white and distractor as red
 				if frameN < cueFrames:
+					if target_idx == 0:
+						blobStim.setFillColor(targetCueColor, log=False)
+						blobStim2.setFillColor(distractorCueColor, log=False)
+					else:
+						blobStim.setFillColor(distractorCueColor, log=False)
+						blobStim2.setFillColor(targetCueColor, log=False)
+					# also draw outline cue on the target for extra salience
 					if target_idx == 0:
 						blobStim.setLineColor(targetCueColor, log=False)
 						blobStim.setLineWidth(4)
 						blobStim.setPos((x1, y1)); blobStim.draw()
 						blobStim.setLineColor(None, log=False)
+					else:
+						blobStim2.setLineColor(targetCueColor, log=False)
+						blobStim2.setLineWidth(4)
+						blobStim2.setPos((x2, y2)); blobStim2.draw()
+						blobStim2.setLineColor(None, log=False)
+				else:
+					# after cue interval both objects use the identical blob color for tracking
+					blobStim.setFillColor(identicalBlobColor, log=False)
+					blobStim2.setFillColor(identicalBlobColor, log=False)
+				blobStim.setLineColor(None, log=False)
+				blobStim2.setLineColor(None, log=False)
+				blobStim.setPos((x1, y1)); blobStim.draw()
+				blobStim2.setPos((x2, y2)); blobStim2.draw()
 
 				myWin.flip()
 
@@ -568,6 +741,8 @@ if __name__ == '__main__':
 				blobStim2.setPos((x2, y2)); blobStim2.draw()
 				draw_trajectory(myWin, basicShape, radii[0], cx, cy)
 				myWin.flip()
+				# provide visual feedback for auto-advance trials as if correct
+				apply_global_flash(True, blobStim, blobStim2, fixation)
 			else:
 				t0 = core.getTime()
 				while not clicked and core.getTime() - t0 < 10.0:
@@ -597,18 +772,18 @@ if __name__ == '__main__':
 			if clicked:
 				if correct:
 					beep_correct.play()
-					# Flash selected object green twice
-					if target_idx == 0:
-						apply_visual_feedback(target_idx, True, x1, y1, blobStim, fixation)
-					else:
-						apply_visual_feedback(target_idx, True, x2, y2, blobStim2, fixation)
+					# Flash both objects green twice
+					# ensure positions are set
+					blobStim.setPos((x1, y1)); blobStim2.setPos((x2, y2))
+					apply_global_flash(True, blobStim, blobStim2, fixation)
 				else:
 					beep_incorrect.play()
-					# Flash selected object red twice
-					if picked == 0:
-						apply_visual_feedback(picked, False, x1, y1, blobStim, fixation)
-					else:
-						apply_visual_feedback(picked, False, x2, y2, blobStim2, fixation)
+					# Flash both objects bright orange twice
+					blobStim.setPos((x1, y1)); blobStim2.setPos((x2, y2))
+					apply_global_flash(False, blobStim, blobStim2, fixation)
+
+			# Standard PsychoPy StairHandler semantics: True=correct, False=incorrect.
+			speed_staircases[thisTrial['stairKey']].addResponse(bool(correct))
 
 			# Write comprehensive trial result to data file
 			trialnum = len(results)
@@ -620,27 +795,25 @@ if __name__ == '__main__':
 				reversal_str += '\t' + '\t'.join(['-999'] * (10 - len(reversal_times)))
 			
 			# Write all trial data
-			print(trialnum, subject, session, part_name, cond, basicShape, 2, speed,
+			print(trialnum, subject, session, part_name, cond, basicShape, 2, speed, motion_rule,
 				  round(initialAngle, 4), round(initialOtherAngle, 4),
 				  cueFrames, int(correct), round(trialDurTotal, 3), 1, target_idx,
 				  len(reversal_times),
 				  sep='\t', end='\t', file=dataFile)
 			print(reversal_str, file=dataFile)
 			dataFile.flush()
-			results.append({'part': part_name, 'condition': cond, 'speed': speed, 'correct': bool(correct)})
+			results.append({'part': part_name, 'condition': cond, 'motionRule': motion_rule, 'speed': speed, 'stairValue': stair_value, 'correct': bool(correct)})
 
 	def run_part1(trial_list):
 		# Enforce 2 objects per trial and run Part 1 (Off-Fixation Standard)
 		print('\n--- Starting Part 1: Off-Fixation Standard ---')
 		# Part 1 uses circular trajectories and fixation at center while trajectory center is offset
-		run_part('part1', trial_list)
+		run_part('Part1', trial_list)
 
 	if 'part1' in parts_to_run:
-		run_part1(trials['part1'])
+		run_part('Part1', trials['part1'])
 	if 'part2' in parts_to_run:
-		run_part('part2', trials['part2'])
-	if 'part3' in parts_to_run:
-		run_part('part3', trials['part3'])
+		run_part('Part2', trials['part2'])
 
 	# Final summary
 	n_correct = sum(1 for r in results if r['correct'])
