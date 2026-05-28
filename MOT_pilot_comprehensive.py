@@ -10,10 +10,11 @@ Parts:
 
 General rules enforced:
  - 2 objects per trial (1 target, 1 distractor)
- - Adaptive staircase on speed across a 1.0 to 2.2 rps range, 96 trials/condition
- - Part 1: 5 conditions total = 480 trials
- - Part 2: 3 conditions = 288 trials
- - 768 total trials
+ - Adaptive staircase on speed across a 1.5 to 2.2 rps range, 96 trials/condition
+ - 5 fixed 1 rps attention-check trials per condition
+ - Part 1: 5 conditions total = 505 trials
+ - Part 2: 3 conditions = 303 trials
+ - 808 total trials
  - Circular trajectories use radius 6 deg
  - Feedback sounds: correct / incorrect
 
@@ -72,10 +73,12 @@ autoAdvance = False
 stair_nUp = 1
 stair_nDown = 3
 stair_stepSizes = [.3, .3, .2, .1, .1, .05]
-stair_start = 1.25
-stair_min = 1.0
+stair_start = 1.85
+stair_min = 1.5
 stair_max = 2.2
 stair_trials_per_condition = 96
+attention_check_trials_per_condition = 5
+attention_check_speed = 1.0
 
 
 def stair_value_to_speed(stair_value):
@@ -85,6 +88,21 @@ def stair_value_to_speed(stair_value):
 	decrease immediately after an incorrect response.
 	"""
 	return stair_min + stair_max - stair_value
+
+
+def make_attention_check_trials(part_name, trial_specs):
+	trials = []
+	for spec in trial_specs:
+		for rep in range(attention_check_trials_per_condition):
+			trials.append({
+				'part': part_name,
+				'condition': spec['condition'],
+				'motionRule': spec.get('motionRule', 'standard'),
+				'trialKind': 'attention_check',
+				'speed': attention_check_speed,
+			})
+	random.shuffle(trials)
+	return trials
 
 # Sounds
 beep_correct = sound.Sound(value='C', secs=0.08)  # simple tone
@@ -375,12 +393,16 @@ def build_session():
 		{'condition': 'far_displaced', 'motionRule': 'varying', 'stairKey': 'Part1|far_displaced|varying'},
 	]
 	part12_trials = make_stair_trials('Part1', combined_trial_specs)
+	part12_trials.extend(make_attention_check_trials('Part1', combined_trial_specs))
 	shape_trial_specs = [
 		{'condition': 'diamond', 'motionRule': 'shape', 'stairKey': 'Part2|diamond'},
 		{'condition': 'sine_circle', 'motionRule': 'shape', 'stairKey': 'Part2|sine_circle'},
 		{'condition': 'ellipse', 'motionRule': 'shape', 'stairKey': 'Part2|ellipse'},
 	]
 	part3_trials = make_stair_trials('Part2', shape_trial_specs)
+	part3_trials.extend(make_attention_check_trials('Part2', shape_trial_specs))
+	random.shuffle(part12_trials)
+	random.shuffle(part3_trials)
 
 	# keep trials separate per part (they are run independently per instructions)
 	return {'part1': part12_trials, 'part2': part3_trials}
@@ -433,14 +455,14 @@ def run_checks_and_report(trials_by_part):
 	# Trial counts
 	counts = {k: len(v) for k, v in trials_by_part.items()}
 	expected_counts = {
-		('Part1', 'centred', 'standard'): stair_trials_per_condition,
-		('Part1', 'near_displaced', 'standard'): stair_trials_per_condition,
-		('Part1', 'far_displaced', 'standard'): stair_trials_per_condition,
-		('Part1', 'near_displaced', 'varying'): stair_trials_per_condition,
-		('Part1', 'far_displaced', 'varying'): stair_trials_per_condition,
-		('Part2', 'diamond', 'shape'): stair_trials_per_condition,
-		('Part2', 'sine_circle', 'shape'): stair_trials_per_condition,
-		('Part2', 'ellipse', 'shape'): stair_trials_per_condition,
+		('Part1', 'centred', 'standard'): stair_trials_per_condition + attention_check_trials_per_condition,
+		('Part1', 'near_displaced', 'standard'): stair_trials_per_condition + attention_check_trials_per_condition,
+		('Part1', 'far_displaced', 'standard'): stair_trials_per_condition + attention_check_trials_per_condition,
+		('Part1', 'near_displaced', 'varying'): stair_trials_per_condition + attention_check_trials_per_condition,
+		('Part1', 'far_displaced', 'varying'): stair_trials_per_condition + attention_check_trials_per_condition,
+		('Part2', 'diamond', 'shape'): stair_trials_per_condition + attention_check_trials_per_condition,
+		('Part2', 'sine_circle', 'shape'): stair_trials_per_condition + attention_check_trials_per_condition,
+		('Part2', 'ellipse', 'shape'): stair_trials_per_condition + attention_check_trials_per_condition,
 	}
 
 	# Counterbalancing: count speeds per part
@@ -557,7 +579,7 @@ if __name__ == '__main__':
 	# Write comprehensive header to TSV file (matching MOT Circular format)
 	# Column order is explicit for downstream analysis
 	header_columns = [
-		'trialnum', 'subject', 'session', 'part', 'condition', 'basicShape', 'numObjects', 'speed', 'motionRule',
+		'trialnum', 'subject', 'session', 'part', 'condition', 'basicShape', 'numObjects', 'speed', 'motionRule', 'trialKind',
 		'initialAngle', 'initialOtherAngle', 'cueFrames', 'correct', 'trialDurTotal', 'numTargets', 'whichIsTarget',
 		'reversal_count'
 	]
@@ -580,12 +602,41 @@ if __name__ == '__main__':
 			pass
 	atexit.register(_close_resources)
 
+	def show_break_screen(message=None):
+		"""Display a simple break screen and wait for the participant to press SPACE.
+		If ESCAPE is pressed the experiment will quit.
+		"""
+		if message is None:
+			message = 'Please take a short break. Press SPACE to continue.'
+		# create a centered text stimulus for the break screen
+		break_text = visual.TextStim(myWin, text=message, color=(1, 1, 1), height=0.8, wrapWidth=40)
+		break_text.draw()
+		myWin.flip()
+		# wait until space is pressed
+		while True:
+			keys = event.waitKeys()
+			if not keys:
+				continue
+			if 'space' in keys or 'spacebar' in keys:
+				core.wait(0.1)
+				break
+			if 'escape' in keys:
+				core.quit()
+
 	def run_part(part_name, trial_list):
 		print(f"Running {part_name} with {len(trial_list)} trials")
+		# Track how many trials have been completed within this part so the 100-trial
+		# break schedule resets at the start of each part.
+		start_index = len(results)
 		for ti, thisTrial in enumerate(trial_list):
+			# insert scheduled break every 100 completed trials WITHIN this part
+			completed_in_part = len(results) - start_index
+			if completed_in_part > 0 and completed_in_part % 100 == 0:
+				show_break_screen(f"Please take a short break. {completed_in_part} trials completed in {part_name}. Press SPACE to continue.")
 			# determine center
 			cond = thisTrial['condition']
 			motion_rule = thisTrial.get('motionRule', 'standard')
+			trial_kind = thisTrial.get('trialKind', 'staircase')
 			if part_name == 'Part1':
 				if cond == 'centred':
 					cx = practice_trajectoryCenterXDeg[0]
@@ -600,8 +651,12 @@ if __name__ == '__main__':
 				cy = 0.0
 				basicShape = cond  # 'diamond','sine_circle','ellipse'
 
-			stair_value = speed_staircases[thisTrial['stairKey']].next()
-			speed = stair_value_to_speed(stair_value)
+			if trial_kind == 'attention_check':
+				speed = attention_check_speed
+				stair_value = None
+			else:
+				stair_value = speed_staircases[thisTrial['stairKey']].next()
+				speed = stair_value_to_speed(stair_value)
 
 			# starting angles (two objects opposite)
 			currAngle = random.random() * 2 * pi
@@ -782,8 +837,9 @@ if __name__ == '__main__':
 					blobStim.setPos((x1, y1)); blobStim2.setPos((x2, y2))
 					apply_global_flash(False, blobStim, blobStim2, fixation)
 
-			# Standard PsychoPy StairHandler semantics: True=correct, False=incorrect.
-			speed_staircases[thisTrial['stairKey']].addResponse(bool(correct))
+			if trial_kind != 'attention_check':
+				# Standard PsychoPy StairHandler semantics: True=correct, False=incorrect.
+				speed_staircases[thisTrial['stairKey']].addResponse(bool(correct))
 
 			# Write comprehensive trial result to data file
 			trialnum = len(results)
@@ -795,14 +851,14 @@ if __name__ == '__main__':
 				reversal_str += '\t' + '\t'.join(['-999'] * (10 - len(reversal_times)))
 			
 			# Write all trial data
-			print(trialnum, subject, session, part_name, cond, basicShape, 2, speed, motion_rule,
+			print(trialnum, subject, session, part_name, cond, basicShape, 2, speed, motion_rule, trial_kind,
 				  round(initialAngle, 4), round(initialOtherAngle, 4),
 				  cueFrames, int(correct), round(trialDurTotal, 3), 1, target_idx,
 				  len(reversal_times),
 				  sep='\t', end='\t', file=dataFile)
 			print(reversal_str, file=dataFile)
 			dataFile.flush()
-			results.append({'part': part_name, 'condition': cond, 'motionRule': motion_rule, 'speed': speed, 'stairValue': stair_value, 'correct': bool(correct)})
+			results.append({'part': part_name, 'condition': cond, 'motionRule': motion_rule, 'trialKind': trial_kind, 'speed': speed, 'stairValue': stair_value, 'correct': bool(correct)})
 
 	def run_part1(trial_list):
 		# Enforce 2 objects per trial and run Part 1 (Off-Fixation Standard)
@@ -812,6 +868,8 @@ if __name__ == '__main__':
 
 	if 'part1' in parts_to_run:
 		run_part('Part1', trials['part1'])
+		# provide a break after Part 1 completes
+		show_break_screen('Part 1 complete. Please take a longer break if needed. Press SPACE to continue to Part 2.')
 	if 'part2' in parts_to_run:
 		run_part('Part2', trials['part2'])
 
