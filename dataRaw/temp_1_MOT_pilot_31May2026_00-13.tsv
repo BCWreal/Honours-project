@@ -1,0 +1,8 @@
+trialnum	subject	session	part	condition	basicShape	numObjects	speed	motionRule	trialKind	staircaseIndex	stairKey	stairStartSpeed	stairValue	initialAngle	initialOtherAngle	cueFrames	correct	trialDurTotal	numTargets	whichIsTarget	reversal_count	timingBlips	numLongFramesAfterFixation	numLongFramesAfterCue	reversal_0	reversal_1	reversal_2	reversal_3	reversal_4	reversal_5	reversal_6	reversal_7	reversal_8	reversal_9
+0	temp	1	Part2	sine_circle	sine_circle	2	0.7000000000000002	shape	staircase	1	Part2|sine_circle|stair1	0.7	3.0	4.8206	1.679	120	1	5.309	1	0	3	315	118	197	2.5417	3.3593	4.7894	-999	-999	-999	-999	-999	-999	-999
+1	temp	1	Part2	diamond	diamond	2	0.7000000000000002	shape	staircase	1	Part2|diamond|stair1	0.7	3.0	2.3885	5.5301	120	1	5.349	1	0	2	318	120	198	2.788	3.6618	-999	-999	-999	-999	-999	-999	-999	-999
+2	temp	1	Part2	ellipse	ellipse	2	0.7000000000000002	shape	staircase	1	Part2|ellipse|stair1	0.7	3.0	2.547	5.6886	120	1	5.316	1	0	2	317	120	197	3.194	4.281	-999	-999	-999	-999	-999	-999	-999	-999
+3	temp	1	Part2	sine_circle	sine_circle	2	0.5	shape	attention_check	0	-999	-999	-999	1.4629	4.6045	120	1	5.181	1	0	3	319	120	199	2.0462	3.0681	4.4694	-999	-999	-999	-999	-999	-999	-999
+4	temp	1	Part2	ellipse	ellipse	2	0.5	shape	attention_check	0	-999	-999	-999	5.5504	2.4088	120	1	5.188	1	0	3	317	119	198	1.8555	3.4865	4.0998	-999	-999	-999	-999	-999	-999	-999
+5	temp	1	Part2	sine_circle	sine_circle	2	0.5	shape	attention_check	0	-999	-999	-999	4.3606	1.219	120	1	5.188	1	0	2	319	120	199	2.5292	4.317	-999	-999	-999	-999	-999	-999	-999	-999
+6	temp	1	Part2	diamond	diamond	2	0.5	shape	attention_check	0	-999	-999	-999	2.6267	5.7683	120	1	5.188	1	0	2	318	119	199	2.9195	3.5395	-999	-999	-999	-999	-999	-999	-999	-999

@@ -1,0 +1,11 @@
+trialnum	subject	session	part	condition	basicShape	numObjects	speed	motionRule	trialKind	initialAngle	initialOtherAngle	cueFrames	correct	trialDurTotal	numTargets	whichIsTarget	reversal_count	reversal_0	reversal_1	reversal_2	reversal_3	reversal_4	reversal_5	reversal_6	reversal_7	reversal_8	reversal_9
+0	temp	1	Part1	near_displaced	circle	2	1.85	standard	staircase	1.3632	4.5048	120	1	10.098	1	0	3	2.4625	3.3118	3.9082	-999	-999	-999	-999	-999	-999	-999
+1	temp	1	Part1	near_displaced	circle	2	1.85	varying	staircase	1.1682	4.3098	120	1	6.697	1	0	2	2.7965	3.8487	-999	-999	-999	-999	-999	-999	-999	-999
+2	temp	1	Part1	far_displaced	circle	2	1.85	varying	staircase	2.6309	5.7725	120	1	6.566	1	0	3	1.7454	2.4391	3.6174	-999	-999	-999	-999	-999	-999	-999
+3	temp	1	Part1	near_displaced	circle	2	2.1500000000000004	standard	staircase	0.5707	3.7123	120	1	6.716	1	0	3	2.767	3.4162	4.2286	-999	-999	-999	-999	-999	-999	-999
+4	temp	1	Part1	centred	circle	2	1.85	standard	staircase	2.8537	5.9953	120	1	6.85	1	0	3	2.389	3.4152	4.1789	-999	-999	-999	-999	-999	-999	-999
+5	temp	1	Part1	far_displaced	circle	2	1.85	standard	staircase	5.2709	2.1293	120	1	6.566	1	0	2	2.8701	4.3163	-999	-999	-999	-999	-999	-999	-999	-999
+6	temp	1	Part1	centred	circle	2	2.1500000000000004	standard	staircase	4.9185	1.7769	120	1	6.866	1	0	2	2.5044	3.6461	-999	-999	-999	-999	-999	-999	-999	-999
+7	temp	1	Part1	near_displaced	circle	2	2.1500000000000004	varying	staircase	1.1539	4.2955	120	1	6.782	1	0	2	2.5219	3.8078	-999	-999	-999	-999	-999	-999	-999	-999
+8	temp	1	Part1	far_displaced	circle	2	2.1500000000000004	varying	staircase	1.1957	4.3373	120	1	6.733	1	0	2	2.5782	3.5628	-999	-999	-999	-999	-999	-999	-999	-999
+9	temp	1	Part1	centred	circle	2	2.2	standard	staircase	5.0727	1.9311	120	0	6.766	1	0	2	2.2654	3.5153	-999	-999	-999	-999	-999	-999	-999	-999

@@ -1,7 +1,7 @@
 """
 MOT_pilot_comprehensive.py
 
-Three-part experiment scaffold derived from MOT Circular / practice files.
+Two-part experiment scaffold derived from MOT Circular / practice files.
 COMPREHENSIVE VERSION with detailed results logging matching MOT Circular.py
 
 Parts:
@@ -10,11 +10,12 @@ Parts:
 
 General rules enforced:
  - 2 objects per trial (1 target, 1 distractor)
- - Adaptive staircase on speed across a 1.5 to 2.2 rps range, 96 trials/condition
- - 5 fixed 1 rps attention-check trials per condition
- - Part 1: 5 conditions total = 505 trials
- - Part 2: 3 conditions = 303 trials
- - 808 total trials
+ - Two interleaved staircases per condition, 25 trials each
+ - Adaptive staircase on speed across a 1.5 to 2.2 rps range
+ - 5 fixed 0.5 rps attention-check trials per condition
+ - Part 1: 5 conditions total = 275 trials including attention checks
+ - Part 2: 3 conditions = 165 trials including attention checks
+ - 440 total trials including attention checks
  - Circular trajectories use radius 6 deg
  - Feedback sounds: correct / incorrect
 
@@ -23,11 +24,10 @@ Results logging includes: trial details, initial angles, reversal times, trial d
 
 from psychopy import prefs
 prefs.hardware['audioLib'] = ['pygame']
-from psychopy import visual, core, event, sound, gui, monitors, data
+from psychopy import visual, core, event, sound, monitors, data
 import numpy as np, random, time, os
+from collections import deque
 from math import pi, cos, sin
-import itertools
-import sys
 from pathlib import Path
 import atexit
 
@@ -68,7 +68,9 @@ refreshRate = 100.0
 trialDurMin = 2
 trackingExtraTime = 1.2
 trackVariableIntervMax = 2.5
-autoAdvance = False
+autoAdvance = os.environ.get('MOT_AUTO_ADVANCE', '0').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+longerThanRefreshTolerance = 0.27
+longFrameLimit = round(1000.0 / refreshRate * (1.0 + longerThanRefreshTolerance), 3)
 
 stair_nUp = 1
 stair_nDown = 3
@@ -76,9 +78,29 @@ stair_stepSizes = [.3, .3, .2, .1, .1, .05]
 stair_start = 1.85
 stair_min = 1.5
 stair_max = 2.2
-stair_trials_per_condition = 96
+stair_trials_per_staircase = 25
+stair_trials_per_condition = stair_trials_per_staircase * 2
 attention_check_trials_per_condition = 5
-attention_check_speed = 1.0
+attention_check_speed = 0.2
+
+stair_start_speed_by_index = {
+	1: 0.7,
+	2: 1.8,
+}
+
+PART1_TRIAL_SPECS = [
+	{'condition': 'centred', 'motionRule': 'standard', 'stairKey': 'Part1|centred|standard'},
+	{'condition': 'near_displaced', 'motionRule': 'standard', 'stairKey': 'Part1|near_displaced|standard'},
+	{'condition': 'far_displaced', 'motionRule': 'standard', 'stairKey': 'Part1|far_displaced|standard'},
+	{'condition': 'near_displaced', 'motionRule': 'varying', 'stairKey': 'Part1|near_displaced|varying'},
+	{'condition': 'far_displaced', 'motionRule': 'varying', 'stairKey': 'Part1|far_displaced|varying'},
+]
+
+PART2_TRIAL_SPECS = [
+	{'condition': 'diamond', 'motionRule': 'shape', 'stairKey': 'Part2|diamond'},
+	{'condition': 'sine_circle', 'motionRule': 'shape', 'stairKey': 'Part2|sine_circle'},
+	{'condition': 'ellipse', 'motionRule': 'shape', 'stairKey': 'Part2|ellipse'},
+]
 
 
 def stair_value_to_speed(stair_value):
@@ -90,6 +112,11 @@ def stair_value_to_speed(stair_value):
 	return stair_min + stair_max - stair_value
 
 
+def display_speed_to_stair_value(display_speed):
+	"""Convert a displayed speed back into the StairHandler value space."""
+	return stair_min + stair_max - display_speed
+
+
 def make_attention_check_trials(part_name, trial_specs):
 	trials = []
 	for spec in trial_specs:
@@ -98,11 +125,451 @@ def make_attention_check_trials(part_name, trial_specs):
 				'part': part_name,
 				'condition': spec['condition'],
 				'motionRule': spec.get('motionRule', 'standard'),
+				'conditionKey': spec['stairKey'],
 				'trialKind': 'attention_check',
 				'speed': attention_check_speed,
 			})
 	random.shuffle(trials)
 	return trials
+
+
+def make_condition_staircase_states(part_name, trial_specs):
+	condition_states = []
+	for spec in trial_specs:
+		condition_key = spec['stairKey']
+		state = {
+			'part': part_name,
+			'condition': spec['condition'],
+			'motionRule': spec.get('motionRule', 'standard'),
+			'conditionKey': condition_key,
+			'next_staircase': 1,
+			'queues': {
+				1: deque(),
+				2: deque(),
+			},
+		}
+		for staircase_index in (1, 2):
+			stair_start_speed = stair_start_speed_by_index[staircase_index]
+			stair_key = f"{condition_key}|stair{staircase_index}"
+			for rep in range(stair_trials_per_staircase):
+				state['queues'][staircase_index].append({
+					'part': part_name,
+					'condition': spec['condition'],
+					'motionRule': spec.get('motionRule', 'standard'),
+					'conditionKey': condition_key,
+					'staircaseIndex': staircase_index,
+					'stairStartSpeed': stair_start_speed,
+					'stairKey': stair_key,
+				})
+		condition_states.append(state)
+	return condition_states
+
+
+def build_interleaved_stair_trials(part_name, trial_specs):
+	condition_states = make_condition_staircase_states(part_name, trial_specs)
+	state_by_condition_key = {state['conditionKey']: state for state in condition_states}
+
+	ordered_trials = []
+
+	opening_round = []
+	for state in condition_states:
+		opening_round.append(state['queues'][1].popleft())
+		state['next_staircase'] = 2
+	random.shuffle(opening_round)
+	ordered_trials.extend(opening_round)
+
+	while True:
+		available_trials = []
+		for state in condition_states:
+			next_staircase = state['next_staircase']
+			if state['queues'][next_staircase]:
+				available_trials.append(state['queues'][next_staircase][0])
+		if not available_trials:
+			break
+
+		chosen_trial = random.choice(available_trials)
+		state = state_by_condition_key[chosen_trial['conditionKey']]
+		next_staircase = state['next_staircase']
+		trial = state['queues'][next_staircase].popleft()
+		ordered_trials.append(trial)
+		state['next_staircase'] = 2 if next_staircase == 1 else 1
+
+	attention_checks = make_attention_check_trials(part_name, trial_specs)
+	if attention_checks:
+		stair_trial_count = len(ordered_trials)
+		early_buffer = max(10, len(trial_specs))
+		spaced_region = max(1, stair_trial_count - early_buffer)
+		insert_after_slots = early_buffer + np.linspace(1, spaced_region, len(attention_checks), dtype=int)
+		spaced_trials = []
+		stair_idx = 0
+		for insert_after, attention_trial in zip(insert_after_slots, attention_checks):
+			while stair_idx < insert_after and stair_idx < stair_trial_count:
+				spaced_trials.append(ordered_trials[stair_idx])
+				stair_idx += 1
+			spaced_trials.append(attention_trial)
+		spaced_trials.extend(ordered_trials[stair_idx:])
+		ordered_trials = spaced_trials
+
+	return ordered_trials
+
+
+def get_part_trial_specs(part_name):
+	if part_name == 'Part1':
+		return PART1_TRIAL_SPECS
+	if part_name == 'Part2':
+		return PART2_TRIAL_SPECS
+	return []
+
+
+def create_staircase_window():
+	# Try to query available screens (pyglet) and place the visualizer on the external/second monitor
+	try:
+		screen_index = 1
+		win_size = [1600, 900]
+		try:
+			import pyglet
+			display = pyglet.canvas.get_display()
+			screens = display.get_screens()
+			# prefer the second screen if present, otherwise use primary
+			if len(screens) > 1:
+				target = screens[1]
+				screen_index = 1
+			else:
+				target = screens[0]
+				screen_index = 0
+			# cap window to screen size
+			width = getattr(target, 'width', win_size[0])
+			height = getattr(target, 'height', win_size[1])
+			win_size = [min(win_size[0], int(width)), min(win_size[1], int(height))]
+		except Exception:
+			# If pyglet not available or querying fails, fall back to sensible defaults
+			screen_index = 1
+			win_size = [1600, 900]
+
+		print(f"Staircase window: target_screen={screen_index}, size={win_size}")
+		return visual.Window(
+			size=win_size,
+			screen=screen_index,
+			fullscr=False,
+			winType='pyglet',
+			units='pix',
+			color=[-0.9, -0.9, -0.9],
+			allowGUI=False,
+			waitBlanking=False,
+			autoLog=False,
+			checkTiming=False,
+		)
+	except Exception as e:
+		print('Staircase window unavailable (continuing without it):', e)
+		return None
+
+
+def show_staircase_startup(win, part_name=None):
+	if win is None:
+		return
+	activate_window(win)
+	msg = 'Staircase window ready\nWaiting for trials...'
+	if part_name:
+		msg = f'{part_name}\n' + msg
+	startup = visual.TextStim(
+		win,
+		text=msg,
+		pos=(0, 0),
+		height=24,
+		color='white',
+		alignText='center',
+	)
+	startup.draw()
+	win.flip()
+
+
+def activate_window(win):
+	"""Best-effort foreground activation for secondary windows."""
+	try:
+		handle = getattr(win, 'winHandle', None)
+		if handle is not None and hasattr(handle, 'activate'):
+			handle.activate()
+	except Exception:
+		pass
+
+
+class StaircaseVisualizer:
+	def __init__(self, win):
+		self.win = win
+		self.part_name = ''
+		self.title = 'Staircase Tracks'
+		self.subtitle = ''
+		self.y_bounds = (0.4, 2.4)
+		self.max_points_per_track = stair_trials_per_staircase
+		self.max_attention_points = attention_check_trials_per_condition
+		self.panel_defs = []
+		self.panel_data = {}
+		self.attention_data = {}
+		self.panel_order = []
+		self.panel_lookup = {}
+		self.track_colors = {1: 'dodgerblue', 2: 'magenta'}
+		self.attention_color = 'gold'
+
+	def set_layout(self, part_name, trial_specs, title=None, subtitle=None, y_bounds=None):
+		if self.win is None:
+			return
+		self.part_name = part_name
+		self.title = title or f'{part_name} staircase visualizer'
+		self.subtitle = subtitle or 'Higher rps at top | Lower rps at bottom'
+		if y_bounds is not None:
+			self.y_bounds = y_bounds
+		self.panel_defs = []
+		self.panel_data = {}
+		self.attention_data = {}
+		self.panel_order = []
+		self.panel_lookup = {}
+		for spec in trial_specs:
+			condition_key = spec['stairKey']
+			# Friendly display name for the condition (replace underscores, capitalize)
+			display_condition = spec['condition'].replace('_', ' ').title()
+			panel_title = display_condition
+			if part_name == 'Part1':
+				panel_title = f"{display_condition} / {spec.get('motionRule', 'standard').title()}"
+			self.panel_defs.append({
+				'conditionKey': condition_key,
+				'label': panel_title,
+				'condition': spec['condition'],
+				'motionRule': spec.get('motionRule', 'standard'),
+			})
+			self.panel_order.append(condition_key)
+			self.panel_lookup[condition_key] = len(self.panel_defs) - 1
+			# fixed-size slot lists for each staircase track (None = no data yet)
+			# each slot will hold either None or a dict {'val': float, 'kind': 'stair'|'attention'}
+			self.panel_data[condition_key] = {1: [None] * self.max_points_per_track, 2: [None] * self.max_points_per_track}
+			self.attention_data[condition_key] = [None] * self.max_attention_points
+		self.draw()
+
+	def add_point(self, condition_key, staircase_index, level, trial_num=None, kind='stair', subtitle=None):
+		"""Add a data point for a given condition/staircase.
+		If trial_num is provided it is treated as 1-based index and the value is
+		stored in that slot. Otherwise the method fills the next free slot.
+		"""
+		if self.win is None:
+			return
+		val = float(level)
+		entry = {'val': val, 'kind': kind}
+		if kind == 'attention':
+			attn = self.attention_data.get(condition_key)
+			if attn is None:
+				return
+			if trial_num is not None:
+				idx = int(trial_num) - 1
+				if 0 <= idx < len(attn):
+					attn[idx] = entry
+				else:
+					return
+			else:
+				for i in range(len(attn)):
+					if attn[i] is None:
+						attn[i] = entry
+						break
+		else:
+			panel = self.panel_data.get(condition_key)
+			if panel is None:
+				return
+			if staircase_index not in panel:
+				return
+			vlist = panel[staircase_index]
+			if trial_num is not None:
+				idx = int(trial_num) - 1
+				if 0 <= idx < len(vlist):
+					vlist[idx] = entry
+				else:
+					return
+			else:
+				for i in range(len(vlist)):
+					if vlist[i] is None:
+						vlist[i] = entry
+						break
+		if subtitle is not None:
+			self.subtitle = subtitle
+		# optional debug printing
+		try:
+			if os.environ.get('MOT_VIS_DEBUG', '0').strip() in ('1', 'true', 'yes'):
+				print(f"VIS_DEBUG: add_point cond={condition_key} stair={staircase_index} trial_num={trial_num} kind={kind} val={val}")
+		except Exception:
+			pass
+		self.draw()
+
+	def _panel_grid(self):
+		n_panels = max(len(self.panel_order), 1)
+		if self.part_name == 'Part1':
+			cols, rows = 3, 2
+		elif self.part_name == 'Part2':
+			cols, rows = 3, 1
+		else:
+			cols = 2 if n_panels > 3 else n_panels
+			rows = int(np.ceil(n_panels / float(cols)))
+		return cols, rows
+
+	def draw(self):
+		if self.win is None:
+			return
+
+		w, h = self.win.size
+		self.win.color = [-0.9, -0.9, -0.9]
+		cols, rows = self._panel_grid()
+
+		outer_x = 34
+		outer_top = 76
+		outer_bottom = 34
+		gap_x = 20
+		gap_y = 24
+		panel_w = (w - 2 * outer_x - (cols - 1) * gap_x) / float(cols)
+		panel_h = (h - outer_top - outer_bottom - (rows - 1) * gap_y) / float(rows)
+		plot_pad_x = 34
+		plot_pad_y = 30
+		low, high = self.y_bounds
+		span = high - low if (high - low) != 0 else 1.0
+
+		title = visual.TextStim(self.win, text=self.title, pos=(0, h / 2 - 20), height=26, color='white')
+		subtitle = visual.TextStim(self.win, text=self.subtitle, pos=(0, h / 2 - 50), height=17, color='white')
+		title.draw()
+		subtitle.draw()
+
+		for idx, condition_key in enumerate(self.panel_order):
+			panel_def = self.panel_defs[idx]
+			col = idx % cols
+			row = idx // cols
+			left = -w / 2 + outer_x + col * (panel_w + gap_x)
+			top = h / 2 - outer_top - row * (panel_h + gap_y)
+			bottom = top - panel_h
+			center_x = left + panel_w / 2.0
+			center_y = bottom + panel_h / 2.0
+
+			panel_box = visual.Rect(
+				self.win,
+				width=panel_w,
+				height=panel_h,
+				pos=(center_x, center_y),
+				lineColor='white',
+				fillColor=None,
+			)
+			panel_box.draw()
+
+			plot_left = left + plot_pad_x
+			plot_right = left + panel_w - plot_pad_x
+			plot_bottom = bottom + plot_pad_y
+			plot_top = bottom + panel_h - plot_pad_y
+			plot_width = plot_right - plot_left
+			plot_height = plot_top - plot_bottom
+
+			# Frame and y-scale guide.
+			visual.Line(self.win, start=(plot_left, plot_bottom), end=(plot_left, plot_top), lineColor='gray').draw()
+			visual.Line(self.win, start=(plot_left, plot_bottom), end=(plot_right, plot_bottom), lineColor='gray').draw()
+
+			label = visual.TextStim(
+				self.win,
+				text=panel_def['label'],
+				pos=(center_x, top - 12),
+				height=16,
+				color='white',
+				alignText='center',
+			)
+			label.draw()
+
+			# draw colored swatches for the two staircases so each panel clearly
+			# represents a single condition with two staircase colours
+			swatch_x = left + 12
+			swatch_y = bottom + 14
+			swatch_gap = 60
+			visual.Rect(self.win, width=10, height=10, pos=(swatch_x, swatch_y), fillColor=self.track_colors[1], lineColor=self.track_colors[1]).draw()
+			visual.TextStim(self.win, text='stair1', pos=(swatch_x + 14, swatch_y), height=11, color='white', alignText='left').draw()
+			visual.Rect(self.win, width=10, height=10, pos=(swatch_x + swatch_gap, swatch_y), fillColor=self.track_colors[2], lineColor=self.track_colors[2]).draw()
+			visual.TextStim(self.win, text='stair2', pos=(swatch_x + swatch_gap + 14, swatch_y), height=11, color='white', alignText='left').draw()
+			visual.Rect(self.win, width=10, height=10, pos=(swatch_x + 2 * swatch_gap, swatch_y), fillColor=self.attention_color, lineColor=self.attention_color).draw()
+			visual.TextStim(self.win, text='attention', pos=(swatch_x + 2 * swatch_gap + 14, swatch_y), height=11, color='white', alignText='left').draw()
+
+			# y-axis anchors so higher rps is visually higher.
+			low_label = visual.TextStim(
+				self.win,
+				text=f'{low:.1f} rps',
+				pos=(plot_left - 16, plot_bottom),
+				height=11,
+				color='white',
+				alignText='right',
+			)
+			high_label = visual.TextStim(
+				self.win,
+				text=f'{high:.1f} rps',
+				pos=(plot_left - 16, plot_top),
+				height=11,
+				color='white',
+				alignText='right',
+			)
+			low_label.draw()
+			high_label.draw()
+
+			trial_left_label = visual.TextStim(
+				self.win,
+				text='1',
+				pos=(plot_left, plot_bottom - 14),
+				height=10,
+				color='white',
+			)
+			trial_right_label = visual.TextStim(
+				self.win,
+				text=str(self.max_points_per_track),
+				pos=(plot_right, plot_bottom - 14),
+				height=10,
+				color='white',
+			)
+			trial_left_label.draw()
+			trial_right_label.draw()
+
+			def _x_for_index(index):
+				if self.max_points_per_track <= 1:
+					return plot_left
+				return plot_left + (plot_width * (index / float(self.max_points_per_track - 1)))
+
+			def _x_for_attention_index(index):
+				if self.max_attention_points <= 1:
+					return plot_left
+				return plot_left + (plot_width * (index / float(self.max_attention_points - 1)))
+
+			def _y_for_speed(speed):
+				return plot_bottom + ((speed - low) / span) * plot_height
+
+			for staircase_index in (1, 2):
+				values = self.panel_data[condition_key][staircase_index]
+				# compute plotted points for fixed slots; skip None entries
+				points = []
+				for slot_idx, speed in enumerate(values):
+					entry = speed
+					if entry is None:
+						continue
+					val = entry.get('val') if isinstance(entry, dict) else float(entry)
+					kind = entry.get('kind') if isinstance(entry, dict) else 'stair'
+					x = _x_for_index(slot_idx)
+					y = _y_for_speed(val)
+					# collect stair points for line drawing, but keep all points for marker drawing
+					if kind == 'stair':
+						points.append((x, y))
+					# draw marker for attention checks immediately (square/yellow), stair points drawn below
+					if kind == 'attention':
+						visual.Rect(self.win, width=6, height=6, pos=(x, y), fillColor='yellow', lineColor='yellow').draw()
+				color = self.track_colors[staircase_index]
+				if len(points) >= 2:
+					for p1, p2 in zip(points[:-1], points[1:]):
+						visual.Line(self.win, start=p1, end=p2, lineColor=color, lineWidth=2).draw()
+				for point in points:
+					visual.Circle(self.win, radius=3.5, pos=point, fillColor=color, lineColor=color).draw()
+
+			attention_values = self.attention_data.get(condition_key, [])
+			for attn_idx, entry in enumerate(attention_values):
+				if entry is None:
+					continue
+				val = entry.get('val') if isinstance(entry, dict) else float(entry)
+				x = _x_for_attention_index(attn_idx)
+				y = _y_for_speed(val)
+				visual.Circle(self.win, radius=3.8, pos=(x, y), fillColor=self.attention_color, lineColor=self.attention_color).draw()
+
+		self.win.flip()
 
 # Sounds
 beep_correct = sound.Sound(value='C', secs=0.08)  # simple tone
@@ -145,8 +612,16 @@ def waveForm(type, speed, timeSeconds, numRing):
 				ans = -1 + 2 * round(np.random.rand(1)[0])
 			return ans
 		else:
-			return 0
-
+							# Only draw up to the most recent max_points_per_track values
+							vals_to_plot = values[-self.max_points_per_track:]
+							n_vals = len(vals_to_plot)
+							# Start index so that x axis always spans 0..max_points_per_track-1
+							start_idx = max(0, self.max_points_per_track - n_vals)
+							for i, speed in enumerate(vals_to_plot):
+								x_idx = start_idx + i
+								x = _x_for_index(x_idx)
+								y = _y_for_speed(speed)
+								points.append((x, y))
 
 def apply_visual_feedback(selected_idx, is_correct, x_pos, y_pos, blob_stim, fix):
 	"""
@@ -367,42 +842,9 @@ def draw_trajectory(myWin, basicShape, radius_deg, cx, cy, num_points=120):
 	# trajectory_line.draw()
 
 
-# -------------------- Trial generation / counterbalancing --------------------
-def make_stair_trials(part_name, trial_specs):
-	trials = []
-	for spec in trial_specs:
-		for rep in range(stair_trials_per_condition):
-			trial = {
-				'part': part_name,
-				'condition': spec['condition'],
-				'motionRule': spec.get('motionRule', 'standard'),
-				'stairKey': spec['stairKey'],
-			}
-			trials.append(trial)
-	random.shuffle(trials)
-	return trials
-
-
 def build_session():
-	# Every condition uses a staircase-driven base speed.
-	combined_trial_specs = [
-		{'condition': 'centred', 'motionRule': 'standard', 'stairKey': 'Part1|centred|standard'},
-		{'condition': 'near_displaced', 'motionRule': 'standard', 'stairKey': 'Part1|near_displaced|standard'},
-		{'condition': 'far_displaced', 'motionRule': 'standard', 'stairKey': 'Part1|far_displaced|standard'},
-		{'condition': 'near_displaced', 'motionRule': 'varying', 'stairKey': 'Part1|near_displaced|varying'},
-		{'condition': 'far_displaced', 'motionRule': 'varying', 'stairKey': 'Part1|far_displaced|varying'},
-	]
-	part12_trials = make_stair_trials('Part1', combined_trial_specs)
-	part12_trials.extend(make_attention_check_trials('Part1', combined_trial_specs))
-	shape_trial_specs = [
-		{'condition': 'diamond', 'motionRule': 'shape', 'stairKey': 'Part2|diamond'},
-		{'condition': 'sine_circle', 'motionRule': 'shape', 'stairKey': 'Part2|sine_circle'},
-		{'condition': 'ellipse', 'motionRule': 'shape', 'stairKey': 'Part2|ellipse'},
-	]
-	part3_trials = make_stair_trials('Part2', shape_trial_specs)
-	part3_trials.extend(make_attention_check_trials('Part2', shape_trial_specs))
-	random.shuffle(part12_trials)
-	random.shuffle(part3_trials)
+	part12_trials = build_interleaved_stair_trials('Part1', PART1_TRIAL_SPECS)
+	part3_trials = build_interleaved_stair_trials('Part2', PART2_TRIAL_SPECS)
 
 	# keep trials separate per part (they are run independently per instructions)
 	return {'part1': part12_trials, 'part2': part3_trials}
@@ -410,32 +852,26 @@ def build_session():
 
 def build_varying_staircases():
 	staircases = {}
-	for part_name, trial_specs in [
-		('Part1', [
-			{'condition': 'centred', 'motionRule': 'standard', 'stairKey': 'Part1|centred|standard'},
-			{'condition': 'near_displaced', 'motionRule': 'standard', 'stairKey': 'Part1|near_displaced|standard'},
-			{'condition': 'far_displaced', 'motionRule': 'standard', 'stairKey': 'Part1|far_displaced|standard'},
-			{'condition': 'near_displaced', 'motionRule': 'varying', 'stairKey': 'Part1|near_displaced|varying'},
-			{'condition': 'far_displaced', 'motionRule': 'varying', 'stairKey': 'Part1|far_displaced|varying'},
-		]),
-		('Part2', [
-			{'condition': 'diamond', 'motionRule': 'shape', 'stairKey': 'Part2|diamond'},
-			{'condition': 'sine_circle', 'motionRule': 'shape', 'stairKey': 'Part2|sine_circle'},
-			{'condition': 'ellipse', 'motionRule': 'shape', 'stairKey': 'Part2|ellipse'},
-		]),
-	]:
+	for part_name, trial_specs in [('Part1', PART1_TRIAL_SPECS), ('Part2', PART2_TRIAL_SPECS)]:
 		for spec in trial_specs:
-			staircases[spec['stairKey']] = data.StairHandler(
-				startVal=stair_start,
-			stepType='lin',
-				stepSizes=stair_stepSizes,
-				minVal=stair_min,
-				maxVal=stair_max,
-				nUp=stair_nUp,
-				nDown=stair_nDown,
-				nTrials=stair_trials_per_condition,
-				extraInfo={'part': part_name, 'condition': spec['condition'], 'motionRule': spec['motionRule']}
-			)
+			for staircase_index in (1, 2):
+				stair_start_speed = stair_start_speed_by_index[staircase_index]
+				staircases[f"{spec['stairKey']}|stair{staircase_index}"] = data.StairHandler(
+					startVal=display_speed_to_stair_value(stair_start_speed),
+					stepType='lin',
+					stepSizes=stair_stepSizes,
+					minVal=stair_min,
+					maxVal=stair_max,
+					nUp=stair_nUp,
+					nDown=stair_nDown,
+					nTrials=stair_trials_per_staircase,
+					extraInfo={
+						'part': part_name,
+						'condition': spec['condition'],
+						'motionRule': spec['motionRule'],
+						'staircaseIndex': staircase_index,
+					}
+				)
 	return staircases
 
 
@@ -454,15 +890,13 @@ def run_checks_and_report(trials_by_part):
 
 	# Trial counts
 	counts = {k: len(v) for k, v in trials_by_part.items()}
-	expected_counts = {
-		('Part1', 'centred', 'standard'): stair_trials_per_condition + attention_check_trials_per_condition,
-		('Part1', 'near_displaced', 'standard'): stair_trials_per_condition + attention_check_trials_per_condition,
-		('Part1', 'far_displaced', 'standard'): stair_trials_per_condition + attention_check_trials_per_condition,
-		('Part1', 'near_displaced', 'varying'): stair_trials_per_condition + attention_check_trials_per_condition,
-		('Part1', 'far_displaced', 'varying'): stair_trials_per_condition + attention_check_trials_per_condition,
-		('Part2', 'diamond', 'shape'): stair_trials_per_condition + attention_check_trials_per_condition,
-		('Part2', 'sine_circle', 'shape'): stair_trials_per_condition + attention_check_trials_per_condition,
-		('Part2', 'ellipse', 'shape'): stair_trials_per_condition + attention_check_trials_per_condition,
+	expected_part_specs = {
+		'part1': PART1_TRIAL_SPECS,
+		'part2': PART2_TRIAL_SPECS,
+	}
+	expected_part_counts = {
+		'part1': len(PART1_TRIAL_SPECS) * stair_trials_per_condition + len(PART1_TRIAL_SPECS) * attention_check_trials_per_condition,
+		'part2': len(PART2_TRIAL_SPECS) * stair_trials_per_condition + len(PART2_TRIAL_SPECS) * attention_check_trials_per_condition,
 	}
 
 	# Counterbalancing: count speeds per part
@@ -482,16 +916,26 @@ def run_checks_and_report(trials_by_part):
 	print('\n=== MOT_pilot verification report ===')
 	print('Circular radii set to 6 deg:', circle_radius_ok)
 	for pname in counts:
-		# compute expected based on the condition+motionRule split in each part
-		unique_keys = set([(t.get('part'), t.get('condition'), t.get('motionRule', 'standard')) for t in trials_by_part[pname]])
-		expected = sum(expected_counts.get(key, 0) for key in unique_keys)
+		expected = expected_part_counts[pname]
 		print(f"{pname}: {counts[pname]} trials (expected {expected})")
 		print('  speed distribution:', speed_counts[pname])
 
+		stair_trials = [t for t in trials_by_part[pname] if t.get('trialKind') != 'attention_check']
+		opening_round = stair_trials[:len(expected_part_specs[pname])]
+		print('  opening round staircase indices:', [t['staircaseIndex'] for t in opening_round])
+		print('  opening round condition keys:', [t['conditionKey'] for t in opening_round])
+
+		for spec in expected_part_specs[pname]:
+			condition_trials = [t for t in stair_trials if t.get('conditionKey') == spec['stairKey']]
+			condition_sequence = [t['staircaseIndex'] for t in condition_trials]
+			expected_sequence = [1, 2] * stair_trials_per_staircase
+			if condition_sequence != expected_sequence:
+				print('  sequence mismatch for', spec['stairKey'], '->', condition_sequence[:10], '...')
+
 	total_trials = sum(counts.values())
 	# compute expected total using the staircase split above
-	expected_total = sum(expected_counts.values())
-	print('Total trials across 3 parts =', total_trials, f'(expected {expected_total})')
+	expected_total = sum(expected_part_counts.values())
+	print('Total trials across 2 parts =', total_trials, f'(expected {expected_total})')
 
 	print('\nFeedback sounds available: correct/inaccurate assigned')
 	print('beep_correct:', beep_correct)
@@ -500,8 +944,7 @@ def run_checks_and_report(trials_by_part):
 	# Quick assertions to flag any issue
 	issues = []
 	for pname in counts:
-		unique_keys = set([(t.get('part'), t.get('condition'), t.get('motionRule', 'standard')) for t in trials_by_part[pname]])
-		expected = sum(expected_counts.get(key, 0) for key in unique_keys)
+		expected = expected_part_counts[pname]
 		if counts[pname] != expected:
 			issues.append(f"{pname} has {counts[pname]} trials (expected {expected})")
 	if total_trials != expected_total:
@@ -523,6 +966,15 @@ if __name__ == '__main__':
 	trials = build_session()
 	run_checks_and_report(trials)
 	parts_to_run = [part.strip().lower() for part in os.environ.get('MOT_PARTS', 'part1,part2').split(',') if part.strip()]
+	trial_limit_raw = os.environ.get('MOT_TRIAL_LIMIT_PER_PART', '').strip()
+	if trial_limit_raw:
+		try:
+			trial_limit = max(1, int(trial_limit_raw))
+		except ValueError:
+			raise ValueError(f"Invalid MOT_TRIAL_LIMIT_PER_PART value: {trial_limit_raw}")
+		for part_key in ('part1', 'part2'):
+			if part_key in trials:
+				trials[part_key] = trials[part_key][:trial_limit]
 
 	# -------------------- Data file setup --------------------
 	subject = 'temp'
@@ -555,7 +1007,9 @@ if __name__ == '__main__':
 	fixation = visual.Circle(myWin, radius=0.2, fillColor=(1, 1, 1), lineColor=None)
 	blobStim = visual.Circle(myWin, radius=0.6, fillColor=(1, -1, -1), lineColor=None)
 	blobStim2 = visual.Circle(myWin, radius=0.6, fillColor=(-1, 1, -1), lineColor=None)
-	cueOutline = visual.Circle(myWin, radius=radii[0] + 0.6, lineColor=(1, 1, 1), fillColor=None)
+	stairWin = create_staircase_window()
+	stairViz = StaircaseVisualizer(stairWin) if stairWin is not None else None
+	show_staircase_startup(stairWin)
 
 	# Trial timing
 	cueFrames = int(refreshRate * trackingExtraTime)
@@ -571,8 +1025,6 @@ if __name__ == '__main__':
 	targetCueColor = np.array([1, 1, 1])
 	# distractor during cue interval (red), flash colors for feedback
 	distractorCueColor = np.array([1, -1, -1])
-	greenFlashColor = np.array([-1, 1, -1])
-	orangeFlashColor = np.array([1, 0.5, -1])
 	trialClock = core.Clock()
 	speed_staircases = build_speed_staircases()
 
@@ -580,8 +1032,9 @@ if __name__ == '__main__':
 	# Column order is explicit for downstream analysis
 	header_columns = [
 		'trialnum', 'subject', 'session', 'part', 'condition', 'basicShape', 'numObjects', 'speed', 'motionRule', 'trialKind',
+		'staircaseIndex', 'staircaseWithinCondition', 'stairKey', 'stairStartSpeed', 'stairValue',
 		'initialAngle', 'initialOtherAngle', 'cueFrames', 'correct', 'trialDurTotal', 'numTargets', 'whichIsTarget',
-		'reversal_count'
+		'reversal_count', 'timingBlips', 'numLongFramesAfterFixation', 'numLongFramesAfterCue'
 	]
 	# add reversal columns
 	for i in range(10):
@@ -598,6 +1051,11 @@ if __name__ == '__main__':
 		try:
 			if 'myWin' in globals() and myWin is not None:
 				myWin.close()
+		except Exception:
+			pass
+		try:
+			if 'stairWin' in globals() and stairWin is not None:
+				stairWin.close()
 		except Exception:
 			pass
 	atexit.register(_close_resources)
@@ -625,6 +1083,13 @@ if __name__ == '__main__':
 
 	def run_part(part_name, trial_list):
 		print(f"Running {part_name} with {len(trial_list)} trials")
+		if stairViz is not None:
+			part_specs = get_part_trial_specs(part_name)
+			panel_title = f'{part_name} staircase tracks'
+			panel_subtitle = 'Two interleaved staircases per condition (higher rps at top)'
+			stairViz.set_layout(part_name, part_specs, title=panel_title, subtitle=panel_subtitle, y_bounds=(0.4, 2.4))
+			# counters for per-condition trial numbers
+			cond_counters = {spec['stairKey']: {1: 0, 2: 0, 'attention': 0} for spec in part_specs}
 		# Track how many trials have been completed within this part so the 100-trial
 		# break schedule resets at the start of each part.
 		start_index = len(results)
@@ -635,8 +1100,13 @@ if __name__ == '__main__':
 				show_break_screen(f"Please take a short break. {completed_in_part} trials completed in {part_name}. Press SPACE to continue.")
 			# determine center
 			cond = thisTrial['condition']
+			condition_key = thisTrial.get('conditionKey', thisTrial.get('stairKey', '-999'))
 			motion_rule = thisTrial.get('motionRule', 'standard')
 			trial_kind = thisTrial.get('trialKind', 'staircase')
+			staircase_index = thisTrial.get('staircaseIndex', 0)
+			staircase_label = f'stair{staircase_index}' if staircase_index in (1, 2) else 'n/a'
+			stair_key = thisTrial.get('stairKey', '-999')
+			stair_start_speed = thisTrial.get('stairStartSpeed', -999)
 			if part_name == 'Part1':
 				if cond == 'centred':
 					cx = practice_trajectoryCenterXDeg[0]
@@ -653,7 +1123,7 @@ if __name__ == '__main__':
 
 			if trial_kind == 'attention_check':
 				speed = attention_check_speed
-				stair_value = None
+				stair_value = -999
 			else:
 				stair_value = speed_staircases[thisTrial['stairKey']].next()
 				speed = stair_value_to_speed(stair_value)
@@ -675,6 +1145,7 @@ if __name__ == '__main__':
 
 			# Record trial start time
 			trial_start_time = trialClock.getTime()
+			ts = []
 
 			# frame loop
 			for frameN in range(trialDurFrames):
@@ -701,6 +1172,7 @@ if __name__ == '__main__':
 
 					# Update object 1 (target) independently
 					phi_dot_0 = phi_dot_log_eccentricity_base_speed(currPhi[0], base_rps, l, r)
+					# Calculate angle (phi) it should be at after moving for dt seconds, applying direction for reversals
 					currPhi[0] = (currPhi[0] + direction * phi_dot_0 * dt) % (2 * np.pi)
 
 					# Update object 2 (distractor) independently
@@ -719,6 +1191,7 @@ if __name__ == '__main__':
 						angleStep = angleStep * (perimeter / circum)
 
 					currAngle = (currAngle + angleStep) % (2 * pi)
+					#Calculate angle of the distractor (otherAngle) which is always pi radians away from the target, then apply same angleStep for reversals
 					otherAngle = (otherAngle + angleStep) % (2 * pi)
 
 					# compute positions depending on shape
@@ -742,11 +1215,11 @@ if __name__ == '__main__':
 					direction *= -1
 					next_reversal_idx += 1
 
-				# offset by center
+				# offset from fixation
 				x1 += cx; y1 += cy
 				x2 += cx; y2 += cy
 
-				# draw
+				# draw everything for this frame
 				fixation.draw()
 				# During the cue interval show the target as white and distractor as red
 				if frameN < cueFrames:
@@ -777,6 +1250,7 @@ if __name__ == '__main__':
 				blobStim2.setPos((x2, y2)); blobStim2.draw()
 
 				myWin.flip()
+				ts.append(trialClock.getTime() - trial_start_time)
 
 			# response collection: ask participant to click the target
 			# draw the objects continuously while waiting so they remain visible
@@ -837,9 +1311,28 @@ if __name__ == '__main__':
 					blobStim.setPos((x1, y1)); blobStim2.setPos((x2, y2))
 					apply_global_flash(False, blobStim, blobStim2, fixation)
 
+			if len(ts) > 1:
+				interframe_intervals = np.diff(ts) * 1000.0
+				long_frame_indices = np.where(interframe_intervals > longFrameLimit)[0]
+			else:
+				long_frame_indices = np.array([], dtype=int)
+			timing_blips = int(len(long_frame_indices))
+			num_long_frames_after_fixation = int(np.sum(long_frame_indices < cueFrames))
+			num_long_frames_after_cue = int(np.sum(long_frame_indices >= cueFrames))
+
+			if stairViz is not None and trial_kind == 'attention_check':
+				cond_counters[condition_key]['attention'] += 1
+				attention_trial_num = cond_counters[condition_key]['attention']
+				stairViz.add_point(condition_key, 0, speed, trial_num=attention_trial_num, kind='attention')
+
 			if trial_kind != 'attention_check':
 				# Standard PsychoPy StairHandler semantics: True=correct, False=incorrect.
 				speed_staircases[thisTrial['stairKey']].addResponse(bool(correct))
+				if stairViz is not None:
+					# increment per-condition/staircase counter and plot at that trial index
+					cond_counters[condition_key][staircase_index] += 1
+					trial_num = cond_counters[condition_key][staircase_index]
+					stairViz.add_point(condition_key, staircase_index, speed, trial_num=trial_num)
 
 			# Write comprehensive trial result to data file
 			trialnum = len(results)
@@ -852,19 +1345,14 @@ if __name__ == '__main__':
 			
 			# Write all trial data
 			print(trialnum, subject, session, part_name, cond, basicShape, 2, speed, motion_rule, trial_kind,
+				  staircase_index, staircase_label, stair_key, stair_start_speed, stair_value,
 				  round(initialAngle, 4), round(initialOtherAngle, 4),
 				  cueFrames, int(correct), round(trialDurTotal, 3), 1, target_idx,
-				  len(reversal_times),
+				  len(reversal_times), timing_blips, num_long_frames_after_fixation, num_long_frames_after_cue,
 				  sep='\t', end='\t', file=dataFile)
 			print(reversal_str, file=dataFile)
 			dataFile.flush()
-			results.append({'part': part_name, 'condition': cond, 'motionRule': motion_rule, 'trialKind': trial_kind, 'speed': speed, 'stairValue': stair_value, 'correct': bool(correct)})
-
-	def run_part1(trial_list):
-		# Enforce 2 objects per trial and run Part 1 (Off-Fixation Standard)
-		print('\n--- Starting Part 1: Off-Fixation Standard ---')
-		# Part 1 uses circular trajectories and fixation at center while trajectory center is offset
-		run_part('Part1', trial_list)
+			results.append({'part': part_name, 'condition': cond, 'motionRule': motion_rule, 'trialKind': trial_kind, 'speed': speed, 'stairValue': stair_value, 'staircaseIndex': staircase_index, 'staircaseWithinCondition': staircase_label, 'stairKey': stair_key, 'correct': bool(correct)})
 
 	if 'part1' in parts_to_run:
 		run_part('Part1', trials['part1'])
@@ -879,3 +1367,12 @@ if __name__ == '__main__':
 	print('Results saved to:', datafileName+'.tsv')
 	dataFile.close()
 	myWin.close()
+	# Visualiser debug summary per panel
+	try:
+		if 'stairViz' in globals() and stairViz is not None and os.environ.get('MOT_VIS_DEBUG', '0').strip() in ('1', 'true', 'yes'):
+			for cond_key, slots in stairViz.panel_data.items():
+				counts = {1: sum(1 for s in slots[1] if s is not None), 2: sum(1 for s in slots[2] if s is not None)}
+				attention_count = sum(1 for s in stairViz.attention_data.get(cond_key, []) if s is not None)
+				print(f"VIS_DEBUG: panel {cond_key} counts: {counts}, attention={attention_count}")
+	except Exception:
+		pass
