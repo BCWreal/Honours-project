@@ -1013,6 +1013,7 @@ if __name__ == '__main__':
 
 	# Trial timing
 	cueFrames = int(refreshRate * trackingExtraTime)
+	timingCheckFrames = cueFrames
 	trialDurFrames = int(trialDurMin * refreshRate) + int(trackingExtraTime * refreshRate)
 	trial_duration_sec = trialDurFrames / refreshRate
 
@@ -1033,7 +1034,7 @@ if __name__ == '__main__':
 	header_columns = [
 		'trialnum', 'subject', 'session', 'part', 'condition', 'basicShape', 'numObjects', 'speed', 'motionRule', 'trialKind',
 		'staircaseIndex', 'staircaseWithinCondition', 'stairKey', 'stairStartSpeed', 'stairValue',
-		'initialAngle', 'initialOtherAngle', 'cueFrames', 'correct', 'trialDurTotal', 'numTargets', 'whichIsTarget',
+		'initialAngle', 'initialOtherAngle', 'cueFrames', 'timingCheckFrames', 'correct', 'trialDurTotal', 'numTargets', 'whichIsTarget',
 		'reversal_count', 'timingBlips', 'numLongFramesAfterFixation', 'numLongFramesAfterCue'
 	]
 	# add reversal columns
@@ -1316,9 +1317,16 @@ if __name__ == '__main__':
 				long_frame_indices = np.where(interframe_intervals > longFrameLimit)[0]
 			else:
 				long_frame_indices = np.array([], dtype=int)
+			trialnum = len(results)
 			timing_blips = int(len(long_frame_indices))
-			num_long_frames_after_fixation = int(np.sum(long_frame_indices < cueFrames))
-			num_long_frames_after_cue = int(np.sum(long_frame_indices >= cueFrames))
+			num_long_frames_after_fixation = int(np.sum(long_frame_indices < timingCheckFrames))
+			num_long_frames_after_cue = int(np.sum(long_frame_indices >= timingCheckFrames))
+			if timing_blips > 0 or os.environ.get('MOT_VIS_DEBUG', '0').strip().lower() in ('1', 'true', 'yes', 'y', 'on'):
+				print(
+					f"TIMING_CHECK: trialnum={trialnum} blips={timing_blips} "
+					f"after_fixation={num_long_frames_after_fixation} after_cue={num_long_frames_after_cue} "
+					f"longFrameLimit={longFrameLimit}"
+				)
 
 			if stairViz is not None and trial_kind == 'attention_check':
 				cond_counters[condition_key]['attention'] += 1
@@ -1335,7 +1343,6 @@ if __name__ == '__main__':
 					stairViz.add_point(condition_key, staircase_index, speed, trial_num=trial_num)
 
 			# Write comprehensive trial result to data file
-			trialnum = len(results)
 			trialDurTotal = trialClock.getTime() - trial_start_time
 			
 			# Format reversal times for output
@@ -1347,7 +1354,7 @@ if __name__ == '__main__':
 			print(trialnum, subject, session, part_name, cond, basicShape, 2, speed, motion_rule, trial_kind,
 				  staircase_index, staircase_label, stair_key, stair_start_speed, stair_value,
 				  round(initialAngle, 4), round(initialOtherAngle, 4),
-				  cueFrames, int(correct), round(trialDurTotal, 3), 1, target_idx,
+				  cueFrames, timingCheckFrames, int(correct), round(trialDurTotal, 3), 1, target_idx,
 				  len(reversal_times), timing_blips, num_long_frames_after_fixation, num_long_frames_after_cue,
 				  sep='\t', end='\t', file=dataFile)
 			print(reversal_str, file=dataFile)
