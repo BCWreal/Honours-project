@@ -58,7 +58,7 @@ if DEFAULT_MONITOR_NAME not in monitors.getAllMonitors():
 		pass
 
 
-# -------------------- Experiment parameters (match practice files) --------------------
+# -------------------- Experiment parameters (match reference files) --------------------
 numRings = 1
 radii = np.array([6.0])  # deg, ensure circular trajectories use 6 degrees
 respRadius = radii[0]
@@ -1017,9 +1017,9 @@ if __name__ == '__main__':
 	trialDurFrames = int(trialDurMin * refreshRate) + int(trackingExtraTime * refreshRate)
 	trial_duration_sec = trialDurFrames / refreshRate
 
-	# Eccentricities used in practice files
-	practice_trajectoryCenterXDeg = [0.0, 5.0, 10.0]
-	practice_trajectoryCenterYDeg = [0.0, 0.0, 0.0]
+	# Eccentricities used for trajectory centers
+	trajectory_center_x_deg = [0.0, 5.0, 10.0]
+	trajectory_center_y_deg = [0.0, 0.0, 0.0]
 
 	results = []
 	identicalBlobColor = np.array([1, -1, -1])
@@ -1110,11 +1110,11 @@ if __name__ == '__main__':
 			stair_start_speed = thisTrial.get('stairStartSpeed', -999)
 			if part_name == 'Part1':
 				if cond == 'centred':
-					cx = practice_trajectoryCenterXDeg[0]
+					cx = trajectory_center_x_deg[0]
 				elif cond == 'near_displaced':
-					cx = practice_trajectoryCenterXDeg[1]
+					cx = trajectory_center_x_deg[1]
 				elif cond == 'far_displaced':
-					cx = practice_trajectoryCenterXDeg[2]
+					cx = trajectory_center_x_deg[2]
 				cy = 0.0
 				basicShape = 'circle'
 			else:  # Part2 shapes
