@@ -72,11 +72,11 @@ autoAdvance = os.environ.get('MOT_AUTO_ADVANCE', '0').strip().lower() in ('1', '
 longerThanRefreshTolerance = 0.27
 longFrameLimit = round(1000.0 / refreshRate * (1.0 + longerThanRefreshTolerance), 3)
 
-stair_nUp = 1
-stair_nDown = 3
+stair_nUp = 3
+stair_nDown = 1
 stair_stepSizes = [.3, .3, .2, .1, .1, .05]
 stair_start = 1.85
-stair_min = 1.5
+stair_min = 0.7
 stair_max = 2.2
 stair_trials_per_staircase = 25
 stair_trials_per_condition = stair_trials_per_staircase * 2
