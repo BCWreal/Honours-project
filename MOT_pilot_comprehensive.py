@@ -72,12 +72,15 @@ autoAdvance = os.environ.get('MOT_AUTO_ADVANCE', '0').strip().lower() in ('1', '
 longerThanRefreshTolerance = 0.27
 longFrameLimit = round(1000.0 / refreshRate * (1.0 + longerThanRefreshTolerance), 3)
 
-stair_nUp = 3
-stair_nDown = 1
+# PsychoPy `StairHandler` uses `nUp` = number of consecutive *incorrect*
+# responses required to step in one direction, and `nDown` = number of
+# consecutive *correct* responses required to step in the opposite direction.
+# We want a 1-up / 3-down rule (1 incorrect -> step, 3 correct -> step), so
+# set `nUp=1` and `nDown=3`.
+stair_nUp = 1
+stair_nDown = 3
 stair_stepSizes = [.3, .3, .2, .1, .1, .05]
 stair_start = 1.85
-stair_min = 0.7
-stair_max = 2.2
 stair_trials_per_staircase = 25
 stair_trials_per_condition = stair_trials_per_staircase * 2
 attention_check_trials_per_condition = 5
@@ -85,7 +88,7 @@ attention_check_speed = 0.2
 
 stair_start_speed_by_index = {
 	1: 0.7,
-	2: 1.8,
+	2: 1.5,
 }
 
 PART1_TRIAL_SPECS = [
@@ -104,17 +107,13 @@ PART2_TRIAL_SPECS = [
 
 
 def stair_value_to_speed(stair_value):
-	"""Map the StairHandler value so speed increases when StairHandler steps down.
-
-	This makes the trial speed increase after 3 consecutive correct responses and
-	decrease immediately after an incorrect response.
-	"""
-	return stair_min + stair_max - stair_value
+	"""Use the StairHandler value directly as speed."""
+	return stair_value
 
 
 def display_speed_to_stair_value(display_speed):
 	"""Convert a displayed speed back into the StairHandler value space."""
-	return stair_min + stair_max - display_speed
+	return display_speed
 
 
 def make_attention_check_trials(part_name, trial_specs):
@@ -128,6 +127,32 @@ def make_attention_check_trials(part_name, trial_specs):
 				'conditionKey': spec['stairKey'],
 				'trialKind': 'attention_check',
 				'speed': attention_check_speed,
+			})
+	random.shuffle(trials)
+	return trials
+
+
+def make_practice_trials(part_name, trial_specs):
+	"""Build practice trials at 1.2 rps, 2 per condition for Part1, 3 per condition for Part2."""
+	practice_speed = 1.2
+	trials = []
+	
+	if part_name == 'Part1':
+		trials_per_condition = 2
+	elif part_name == 'Part2':
+		trials_per_condition = 3
+	else:
+		trials_per_condition = 2
+	
+	for spec in trial_specs:
+		for rep in range(trials_per_condition):
+			trials.append({
+				'part': part_name,
+				'condition': spec['condition'],
+				'motionRule': spec.get('motionRule', 'standard'),
+				'conditionKey': spec['stairKey'],
+				'trialKind': 'practice',
+				'speed': practice_speed,
 			})
 	random.shuffle(trials)
 	return trials
@@ -860,10 +885,11 @@ def build_varying_staircases():
 					startVal=display_speed_to_stair_value(stair_start_speed),
 					stepType='lin',
 					stepSizes=stair_stepSizes,
-					minVal=stair_min,
-					maxVal=stair_max,
+					minVal=None,
+					maxVal=2.5,
 					nUp=stair_nUp,
 					nDown=stair_nDown,
+					applyInitialRule=False,
 					nTrials=stair_trials_per_staircase,
 					extraInfo={
 						'part': part_name,
@@ -1084,13 +1110,220 @@ if __name__ == '__main__':
 
 	def run_part(part_name, trial_list):
 		print(f"Running {part_name} with {len(trial_list)} trials")
+		
+		# Build and run practice trials first
+		part_specs = get_part_trial_specs(part_name)
+		practice_trials = make_practice_trials(part_name, part_specs)
+		if practice_trials:
+			print(f"Running {len(practice_trials)} practice trials for {part_name}")
+			show_break_screen(f"{part_name} Practice Trials\n\nYou will now do {len(practice_trials)} practice trials to familiarize yourself with the task.\n\nPress SPACE to begin.")
+			# Run practice trials (they don't affect the staircase)
+			for pt_idx, practice_trial in enumerate(practice_trials):
+				# All practice code here (same as main loop but marked as practice)
+				cond = practice_trial['condition']
+				motion_rule = practice_trial.get('motionRule', 'standard')
+				speed = practice_trial['speed']
+				
+				if part_name == 'Part1':
+					if cond == 'centred':
+						cx = trajectory_center_x_deg[0]
+					elif cond == 'near_displaced':
+						cx = trajectory_center_x_deg[1]
+					elif cond == 'far_displaced':
+						cx = trajectory_center_x_deg[2]
+					cy = 0.0
+					basicShape = 'circle'
+				else:  # Part2 shapes
+					cx = 0.0
+					cy = 0.0
+					basicShape = cond
+				
+				# Starting angles (two objects opposite)
+				currTargetAngle = random.random() * 2 * pi
+				distractorAngle = (currTargetAngle + pi) % (2 * pi)
+				initialAngle = currTargetAngle
+				initialOtherAngle = distractorAngle
+				
+				currPhi = [random.random() * 2 * pi, 0.0]
+				currPhi[1] = (currPhi[0] + pi) % (2 * pi)
+				direction = 1
+				reversal_times = get_reversal_times(trial_duration_sec)
+				next_reversal_idx = 0
+				target_idx = 0
+				trial_start_time = trialClock.getTime()
+				ts = []
+				
+				# Frame loop (identical to main loop)
+				for frameN in range(trialDurFrames):
+					timeSec = frameN / refreshRate
+					if part_name == 'Part1' and basicShape == 'circle' and motion_rule == 'varying':
+						dt = 1.0 / refreshRate
+						l = np.sqrt(cx * cx + cy * cy)
+						base_rps = speed
+						r = radii[0]
+						
+						phi_dot_0 = phi_dot_log_eccentricity_base_speed(currPhi[0], base_rps, l, r)
+						currPhi[0] = (currPhi[0] + direction * phi_dot_0 * dt) % (2 * np.pi)
+						phi_dot_1 = phi_dot_log_eccentricity_base_speed(currPhi[1], base_rps, l, r)
+						currPhi[1] = (currPhi[1] + direction * phi_dot_1 * dt) % (2 * np.pi)
+						
+						x1, y1 = circle_xy(r, currPhi[0], timeSec, base_rps, 0)
+						x2, y2 = circle_xy(r, currPhi[1], timeSec, base_rps, 0)
+					else:
+						angleStep = direction * speed * 2 * pi / refreshRate
+						if basicShape == 'diamond':
+							perimeter = radii[0] * 4.0
+							circum = 2 * pi * radii[0]
+							angleStep = angleStep * (perimeter / circum)
+						
+						currTargetAngle = (currTargetAngle + angleStep) % (2 * pi)
+						distractorAngle = (distractorAngle + angleStep) % (2 * pi)
+						
+						if basicShape == 'circle':
+							x1, y1 = circle_xy(radii[0], currTargetAngle, timeSec, speed, 0)
+							x2, y2 = circle_xy(radii[0], distractorAngle, timeSec, speed, 0)
+						elif basicShape == 'diamond':
+							x1, y1 = diamond_xy(radii[0], currTargetAngle)
+							x2, y2 = diamond_xy(radii[0], distractorAngle)
+						elif basicShape == 'sine_circle':
+							x1, y1 = sine_circle_xy(radii[0], currTargetAngle)
+							x2, y2 = sine_circle_xy(radii[0], distractorAngle)
+						elif basicShape == 'ellipse':
+							x1, y1 = ellipse_xy(radii[0], currTargetAngle)
+							x2, y2 = ellipse_xy(radii[0], distractorAngle)
+						else:
+							x1, y1 = circle_xy(radii[0], currTargetAngle)
+							x2, y2 = circle_xy(radii[0], distractorAngle)
+					
+					if next_reversal_idx < len(reversal_times) and timeSec > reversal_times[next_reversal_idx]:
+						direction *= -1
+						next_reversal_idx += 1
+					
+					x1 += cx; y1 += cy
+					x2 += cx; y2 += cy
+					
+					fixation.draw()
+					if frameN < cueFrames:
+						if target_idx == 0:
+							blobStim.setFillColor(targetCueColor, log=False)
+							blobStim2.setFillColor(distractorCueColor, log=False)
+						else:
+							blobStim.setFillColor(distractorCueColor, log=False)
+							blobStim2.setFillColor(targetCueColor, log=False)
+						if target_idx == 0:
+							blobStim.setLineColor(targetCueColor, log=False)
+							blobStim.setLineWidth(4)
+							blobStim.setPos((x1, y1)); blobStim.draw()
+							blobStim.setLineColor(None, log=False)
+						else:
+							blobStim2.setLineColor(targetCueColor, log=False)
+							blobStim2.setLineWidth(4)
+							blobStim2.setPos((x2, y2)); blobStim2.draw()
+							blobStim2.setLineColor(None, log=False)
+					else:
+						blobStim.setFillColor(identicalBlobColor, log=False)
+						blobStim2.setFillColor(identicalBlobColor, log=False)
+					blobStim.setLineColor(None, log=False)
+					blobStim2.setLineColor(None, log=False)
+					blobStim.setPos((x1, y1)); blobStim.draw()
+					blobStim2.setPos((x2, y2)); blobStim2.draw()
+					
+					myWin.flip()
+					ts.append(trialClock.getTime() - trial_start_time)
+				
+				# Response collection
+				resp = None
+				correct = False
+				mouse = event.Mouse(win=myWin)
+				clicked = False
+				if autoAdvance:
+					clicked = True
+					correct = True
+					fixation.draw()
+					blobStim.setFillColor(identicalBlobColor, log=False)
+					blobStim2.setFillColor(identicalBlobColor, log=False)
+					blobStim.setLineColor(None, log=False)
+					blobStim2.setLineColor(None, log=False)
+					blobStim.setPos((x1, y1)); blobStim.draw()
+					blobStim2.setPos((x2, y2)); blobStim2.draw()
+					draw_trajectory(myWin, basicShape, radii[0], cx, cy)
+					myWin.flip()
+					apply_global_flash(True, blobStim, blobStim2, fixation)
+				else:
+					t0 = core.getTime()
+					while not clicked and core.getTime() - t0 < 10.0:
+						fixation.draw()
+						blobStim.setFillColor(identicalBlobColor, log=False)
+						blobStim2.setFillColor(identicalBlobColor, log=False)
+						blobStim.setLineColor(None, log=False)
+						blobStim2.setLineColor(None, log=False)
+						blobStim.setPos((x1, y1)); blobStim.draw()
+						blobStim2.setPos((x2, y2)); blobStim2.draw()
+						draw_trajectory(myWin, basicShape, radii[0], cx, cy)
+						myWin.flip()
+						if mouse.getPressed()[0]:
+							mx, my = mouse.getPos()
+							d1 = (mx - x1) ** 2 + (my - y1) ** 2
+							d2 = (mx - x2) ** 2 + (my - y2) ** 2
+							picked = 0 if d1 < d2 else 1
+							correct = (picked == target_idx)
+							clicked = True
+							break
+						keys = event.getKeys()
+						if 'escape' in keys:
+							core.quit()
+				
+				# Feedback
+				if clicked:
+					if correct:
+						beep_correct.play()
+						blobStim.setPos((x1, y1)); blobStim2.setPos((x2, y2))
+						apply_global_flash(True, blobStim, blobStim2, fixation)
+					else:
+						beep_incorrect.play()
+						blobStim.setPos((x1, y1)); blobStim2.setPos((x2, y2))
+						apply_global_flash(False, blobStim, blobStim2, fixation)
+				
+				# Timing analysis
+				if len(ts) > 1:
+					interframe_intervals = np.diff(ts) * 1000.0
+					long_frame_indices = np.where(interframe_intervals > longFrameLimit)[0]
+				else:
+					long_frame_indices = np.array([], dtype=int)
+				
+				trialnum = len(results)
+				timing_blips = int(len(long_frame_indices))
+				num_long_frames_after_fixation = int(np.sum(long_frame_indices < timingCheckFrames))
+				num_long_frames_after_cue = int(np.sum(long_frame_indices >= timingCheckFrames))
+				
+				# Write practice trial to TSV
+				trialDurTotal = trialClock.getTime() - trial_start_time
+				reversal_str = '\t'.join([str(round(r, 4)) for r in reversal_times])
+				if len(reversal_times) < 10:
+					reversal_str += '\t' + '\t'.join(['-999'] * (10 - len(reversal_times)))
+				
+				print(trialnum, subject, session, part_name, cond, basicShape, 2, speed, motion_rule, 'practice',
+					  0, 'n/a', '-999', -999, -999,
+					  round(initialAngle, 4), round(initialOtherAngle, 4),
+					  cueFrames, timingCheckFrames, int(correct), round(trialDurTotal, 3), 1, target_idx,
+					  len(reversal_times), timing_blips, num_long_frames_after_fixation, num_long_frames_after_cue,
+					  sep='\t', end='\t', file=dataFile)
+				print(reversal_str, file=dataFile)
+				dataFile.flush()
+				results.append({'part': part_name, 'condition': cond, 'motionRule': motion_rule, 'trialKind': 'practice', 'speed': speed, 'stairValue': -999, 'staircaseIndex': 0, 'staircaseWithinCondition': 'n/a', 'stairKey': '-999', 'correct': bool(correct)})
+		
+		# Show break before main trials
+		if practice_trials:
+			show_break_screen(f"Practice trials complete. Press SPACE to begin the actual {part_name} trials.")
+		
+		# Set up staircase visualization
 		if stairViz is not None:
-			part_specs = get_part_trial_specs(part_name)
 			panel_title = f'{part_name} staircase tracks'
 			panel_subtitle = 'Two interleaved staircases per condition (higher rps at top)'
 			stairViz.set_layout(part_name, part_specs, title=panel_title, subtitle=panel_subtitle, y_bounds=(0.4, 2.4))
 			# counters for per-condition trial numbers
 			cond_counters = {spec['stairKey']: {1: 0, 2: 0, 'attention': 0} for spec in part_specs}
+		
 		# Track how many trials have been completed within this part so the 100-trial
 		# break schedule resets at the start of each part.
 		start_index = len(results)
@@ -1130,10 +1363,10 @@ if __name__ == '__main__':
 				speed = stair_value_to_speed(stair_value)
 
 			# starting angles (two objects opposite)
-			currAngle = random.random() * 2 * pi
-			otherAngle = (currAngle + pi) % (2 * pi)
-			initialAngle = currAngle
-			initialOtherAngle = otherAngle
+			currTargetAngle = random.random() * 2 * pi
+			distractorAngle = (currTargetAngle + pi) % (2 * pi)
+			initialAngle = currTargetAngle
+			initialOtherAngle = distractorAngle
 			
 			currPhi = [random.random() * 2 * pi, 0.0]
 			currPhi[1] = (currPhi[0] + pi) % (2 * pi)
@@ -1191,26 +1424,26 @@ if __name__ == '__main__':
 						circum = 2 * pi * radii[0]
 						angleStep = angleStep * (perimeter / circum)
 
-					currAngle = (currAngle + angleStep) % (2 * pi)
-					#Calculate angle of the distractor (otherAngle) which is always pi radians away from the target, then apply same angleStep for reversals
-					otherAngle = (otherAngle + angleStep) % (2 * pi)
+					currTargetAngle = (currTargetAngle + angleStep) % (2 * pi)
+					#Calculate angle of the distractor (distractorAngle) which is always pi radians away from the target, then apply same angleStep for reversals
+					distractorAngle = (distractorAngle + angleStep) % (2 * pi)
 
 					# compute positions depending on shape
 					if basicShape == 'circle':
-						x1, y1 = circle_xy(radii[0], currAngle, timeSec, speed, 0)
-						x2, y2 = circle_xy(radii[0], otherAngle, timeSec, speed, 0)
+						x1, y1 = circle_xy(radii[0], currTargetAngle, timeSec, speed, 0)
+						x2, y2 = circle_xy(radii[0], distractorAngle, timeSec, speed, 0)
 					elif basicShape == 'diamond':
-						x1, y1 = diamond_xy(radii[0], currAngle)
-						x2, y2 = diamond_xy(radii[0], otherAngle)
+						x1, y1 = diamond_xy(radii[0], currTargetAngle)
+						x2, y2 = diamond_xy(radii[0], distractorAngle)
 					elif basicShape == 'sine_circle':
-						x1, y1 = sine_circle_xy(radii[0], currAngle)
-						x2, y2 = sine_circle_xy(radii[0], otherAngle)
+						x1, y1 = sine_circle_xy(radii[0], currTargetAngle)
+						x2, y2 = sine_circle_xy(radii[0], distractorAngle)
 					elif basicShape == 'ellipse':
-						x1, y1 = ellipse_xy(radii[0], currAngle)
-						x2, y2 = ellipse_xy(radii[0], otherAngle)
+						x1, y1 = ellipse_xy(radii[0], currTargetAngle)
+						x2, y2 = ellipse_xy(radii[0], distractorAngle)
 					else:
-						x1, y1 = circle_xy(radii[0], currAngle)
-						x2, y2 = circle_xy(radii[0], otherAngle)
+						x1, y1 = circle_xy(radii[0], currTargetAngle)
+						x2, y2 = circle_xy(radii[0], distractorAngle)
 
 				if next_reversal_idx < len(reversal_times) and timeSec > reversal_times[next_reversal_idx]:
 					direction *= -1
@@ -1334,7 +1567,9 @@ if __name__ == '__main__':
 				stairViz.add_point(condition_key, 0, speed, trial_num=attention_trial_num, kind='attention')
 
 			if trial_kind != 'attention_check':
-				# Standard PsychoPy StairHandler semantics: True=correct, False=incorrect.
+				# PsychoPy `StairHandler` semantics: pass `True` for a correct
+				# response and `False` for incorrect. Use the raw `correct`
+				# boolean so step directions follow `nUp`/`nDown` as configured.
 				speed_staircases[thisTrial['stairKey']].addResponse(bool(correct))
 				if stairViz is not None:
 					# increment per-condition/staircase counter and plot at that trial index
