@@ -46,7 +46,8 @@ if DEFAULT_MONITOR_NAME not in monitors.getAllMonitors():
 		m = monitors.Monitor(DEFAULT_MONITOR_NAME)
 		# Best-effort defaults; adjust if you have a specific monitor
 		try:
-			m.setSizePix((1920, 1080))
+			_, default_size = get_screen_info(prefer_second=False)
+			m.setSizePix(default_size)
 			m.setWidth(52)  # physical width in cm
 		except Exception:
 			pass
@@ -56,7 +57,22 @@ if DEFAULT_MONITOR_NAME not in monitors.getAllMonitors():
 			pass
 	except Exception:
 		pass
+def get_screen_info(prefer_second=False):
+	try:
+		import pyglet
+		display = pyglet.canvas.get_display()
+		screens = display.get_screens()
 
+		if prefer_second and len(screens) > 1:
+			screen_index = 1
+			screen = screens[1]
+		else:
+			screen_index = 0
+			screen = screens[0]
+
+		return screen_index, [int(screen.width), int(screen.height)]
+	except Exception:
+		return 0, [1920, 1080]
 
 # -------------------- Experiment parameters (match reference files) --------------------
 numRings = 1
@@ -250,7 +266,7 @@ def create_staircase_window():
 	# Try to query available screens (pyglet) and place the visualizer on the external/second monitor
 	try:
 		screen_index = 1
-		win_size = [1600, 900]
+		win_size = [1920, 1080]
 		try:
 			import pyglet
 			display = pyglet.canvas.get_display()
@@ -269,7 +285,7 @@ def create_staircase_window():
 		except Exception:
 			# If pyglet not available or querying fails, fall back to sensible defaults
 			screen_index = 1
-			win_size = [1600, 900]
+			win_size = [1920, 1080]
 
 		print(f"Staircase window: target_screen={screen_index}, size={win_size}")
 		return visual.Window(
@@ -1293,7 +1309,6 @@ if __name__ == '__main__':
 				
 				trialnum = len(results)
 				timing_blips = int(len(long_frame_indices))
-				num_long_frames_after_fixation = int(np.sum(long_frame_indices < timingCheckFrames))
 				num_long_frames_after_cue = int(np.sum(long_frame_indices >= timingCheckFrames))
 				
 				# Write practice trial to TSV
@@ -1306,7 +1321,7 @@ if __name__ == '__main__':
 					  0, 'n/a', '-999', -999, -999,
 					  round(initialAngle, 4), round(initialOtherAngle, 4),
 					  cueFrames, timingCheckFrames, int(correct), round(trialDurTotal, 3), 1, target_idx,
-					  len(reversal_times), timing_blips, num_long_frames_after_fixation, num_long_frames_after_cue,
+					  len(reversal_times), timing_blips, num_long_frames_after_cue,
 					  sep='\t', end='\t', file=dataFile)
 				print(reversal_str, file=dataFile)
 				dataFile.flush()
@@ -1552,12 +1567,11 @@ if __name__ == '__main__':
 				long_frame_indices = np.array([], dtype=int)
 			trialnum = len(results)
 			timing_blips = int(len(long_frame_indices))
-			num_long_frames_after_fixation = int(np.sum(long_frame_indices < timingCheckFrames))
 			num_long_frames_after_cue = int(np.sum(long_frame_indices >= timingCheckFrames))
 			if timing_blips > 0 or os.environ.get('MOT_VIS_DEBUG', '0').strip().lower() in ('1', 'true', 'yes', 'y', 'on'):
 				print(
 					f"TIMING_CHECK: trialnum={trialnum} blips={timing_blips} "
-					f"after_fixation={num_long_frames_after_fixation} after_cue={num_long_frames_after_cue} "
+					f"after_cue={num_long_frames_after_cue} "
 					f"longFrameLimit={longFrameLimit}"
 				)
 
@@ -1590,7 +1604,7 @@ if __name__ == '__main__':
 				  staircase_index, staircase_label, stair_key, stair_start_speed, stair_value,
 				  round(initialAngle, 4), round(initialOtherAngle, 4),
 				  cueFrames, timingCheckFrames, int(correct), round(trialDurTotal, 3), 1, target_idx,
-				  len(reversal_times), timing_blips, num_long_frames_after_fixation, num_long_frames_after_cue,
+				  len(reversal_times), timing_blips, num_long_frames_after_cue,
 				  sep='\t', end='\t', file=dataFile)
 			print(reversal_str, file=dataFile)
 			dataFile.flush()

@@ -15,7 +15,7 @@ import random
 import statistics
 from collections import defaultdict
 
-import MOT_pilot_comprehensive as pilot
+import Pilot_comprehensive as pilot
 
 random.seed(12345)
 

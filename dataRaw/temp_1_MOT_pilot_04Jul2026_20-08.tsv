@@ -1,0 +1,12 @@
+trialnum	subject	session	part	condition	basicShape	numObjects	speed	motionRule	trialKind	staircaseIndex	staircaseWithinCondition	stairKey	stairStartSpeed	stairValue	initialAngle	initialOtherAngle	cueFrames	timingCheckFrames	correct	trialDurTotal	numTargets	whichIsTarget	reversal_count	timingBlips	numLongFramesAfterFixation	numLongFramesAfterCue	reversal_0	reversal_1	reversal_2	reversal_3	reversal_4	reversal_5	reversal_6	reversal_7	reversal_8	reversal_9
+0	temp	1	Part1	near_displaced	circle	2	0.5	varying	practice	0	n/a	-999	-999	-999	5.6944	2.5528	120	120	1	5.114	1	0	3	310	192	2.4146	3.2279	4.1548	-999	-999	-999	-999	-999	-999	-999
+1	temp	1	Part1	near_displaced	circle	2	1.0	standard	practice	0	n/a	-999	-999	-999	4.4748	1.3332	120	120	1	5.64	1	0	2	308	195	2.4951	4.3352	-999	-999	-999	-999	-999	-999	-999	-999
+2	temp	1	Part1	centred	circle	2	1.0	standard	practice	0	n/a	-999	-999	-999	1.0275	4.1691	120	120	1	5.415	1	0	3	314	196	1.7589	3.095	3.9688	-999	-999	-999	-999	-999	-999	-999
+3	temp	1	Part1	near_displaced	circle	2	0.5	standard	practice	0	n/a	-999	-999	-999	5.9755	2.8339	120	120	0	5.255	1	0	2	318	198	2.3709	3.8932	-999	-999	-999	-999	-999	-999	-999	-999
+4	temp	1	Part1	near_displaced	circle	2	1.0	varying	practice	0	n/a	-999	-999	-999	1.0769	4.2184	120	120	1	5.322	1	0	3	316	196	1.9663	3.0352	4.7783	-999	-999	-999	-999	-999	-999	-999
+5	temp	1	Part1	centred	circle	2	0.5	standard	practice	0	n/a	-999	-999	-999	2.8003	5.9419	120	120	1	5.361	1	0	2	317	197	2.7573	3.9385	-999	-999	-999	-999	-999	-999	-999	-999
+6	temp	1	Part1	far_displaced	circle	2	0.5	standard	practice	0	n/a	-999	-999	-999	6.2495	3.1079	120	120	0	5.254	1	0	2	313	198	2.9248	4.1017	-999	-999	-999	-999	-999	-999	-999	-999
+7	temp	1	Part1	far_displaced	circle	2	1.0	standard	practice	0	n/a	-999	-999	-999	2.4694	5.611	120	120	0	5.335	1	0	3	316	197	2.5782	3.2755	4.2312	-999	-999	-999	-999	-999	-999	-999
+8	temp	1	Part1	far_displaced	circle	2	0.5	varying	practice	0	n/a	-999	-999	-999	3.8387	0.6971	120	120	1	5.068	1	0	2	318	198	3.0353	4.892	-999	-999	-999	-999	-999	-999	-999	-999
+9	temp	1	Part1	far_displaced	circle	2	1.0	varying	practice	0	n/a	-999	-999	-999	4.8541	1.7125	120	120	1	5.455	1	0	2	319	199	3.1854	5.1002	-999	-999	-999	-999	-999	-999	-999	-999
+10	temp	1	Part1	near_displaced	circle	2	0.7	standard	staircase	1	stair1	Part1|near_displaced|standard|stair1	0.7	-0.7	0.0316	3.1732	120	120	1	5.833	1	0	3	272	154	2.1067	3.4471	4.4921	-999	-999	-999	-999	-999	-999	-999
