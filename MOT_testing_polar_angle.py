@@ -25,97 +25,264 @@ Results logging includes: trial details, initial angles, reversal times, trial d
 from psychopy import prefs
 prefs.hardware['audioLib'] = ['pygame']
 from psychopy import visual, core, event, sound, monitors, data, gui, info, logging
+from psychopy.hardware import keyboard
 import numpy as np, random, time, os
 from collections import deque
 from math import pi, cos, sin
 from pathlib import Path
 import atexit
 
-# Eye-tracking integration (disabled by default; mirrors AH Circular's structure without changing trial abortion/repetition rules)
-eyetracking = False
+# Eye-tracking integration based on the Exp1b session wrapper.
+eyetracking = True
 
-class NullEyeTracker:
-	def __init__(self, *args, **kwargs):
-		self.enabled = False
-
-	def start_recording(self, *args, **kwargs):
-		return None
-
-	def send_message(self, *args, **kwargs):
-		return None
-
-	def stop_recording(self, *args, **kwargs):
-		return None
-
-	def close_connection(self, *args, **kwargs):
-		return 'Eye tracking disabled'
+HAS_PYLINK = False
+_PYLINK_IMPORT_ERROR = None
+try:
+	import pylink
+	from EyeLinkCoreGraphicsPsychoPy import EyeLinkCoreGraphicsPsychoPy
+	HAS_PYLINK = True
+except Exception as exc:
+	pylink = None
+	EyeLinkCoreGraphicsPsychoPy = None
+	_PYLINK_IMPORT_ERROR = exc
 
 
-class EyeLinkTrackerAdapter:
-	def __init__(self, tracker):
-		self._tracker = tracker
-		self.enabled = True
+def _default_eye_mode():
+	if HAS_PYLINK and eyetracking:
+		return 'live'
+	return 'off'
 
-	def start_recording(self, trial_num, calib_trial=True, widthPix=None, heightPix=None):
-		if hasattr(self._tracker, 'startEyeTracking'):
-			self._tracker.startEyeTracking(trial_num, calibTrial=calib_trial, widthPix=widthPix, heightPix=heightPix)
+
+EYE = {
+	'mode': os.environ.get('MOT_EYE_MODE', _default_eye_mode()).strip().lower(),
+	'host_ip': os.environ.get('MOT_EYE_HOST_IP', '100.1.1.1'),
+	'calibration_type': os.environ.get('MOT_EYE_CALIBRATION_TYPE', 'HV9'),
+	'log_edf': os.environ.get('MOT_EYE_LOG_EDF', '1').strip().lower() in ('1', 'true', 'yes', 'y', 'on'),
+	'fixation_window_deg': float(os.environ.get('MOT_EYE_FIXATION_WINDOW_DEG', '3.0')),
+	'fix_break_consec_frames': int(os.environ.get('MOT_EYE_FIX_BREAK_CONSEC_FRAMES', '1')),
+}
+if not HAS_PYLINK:
+	EYE['mode'] = 'off'
+if EYE['mode'] not in ('off', 'dummy', 'live'):
+	EYE['mode'] = 'off'
+
+
+class EyeLinkSession:
+	"""Wrapper around pylink for one session of the MOT experiment."""
+
+	def __init__(self, mode, edf_basename, host_ip, calibration_type='HV9', log_edf=True):
+		self.mode = mode
+		self.edf_basename = edf_basename[:8]
+		self.edf_filename = self.edf_basename + '.EDF'
+		self.host_ip = host_ip
+		self.calibration_type = calibration_type
+		self.log_edf = bool(log_edf)
+		self.tracker = None
+		self.genv = None
+		self.scn_w = 0
+		self.scn_h = 0
+		self.fix_el_x = 0.0
+		self.fix_el_y = 0.0
+		self.fix_win_px = 0.0
+		self.fix_win_deg = 3.0
+		self.eye_used = 0
+		self.eyelink_ver = 0
+
+	def is_active(self):
+		return self.mode in ('dummy', 'live') and self.tracker is not None
+
+	def open(self):
+		if self.mode == 'off':
+			return
+		if not HAS_PYLINK:
+			raise RuntimeError(
+				"EyeLink mode '{}' requested but pylink could not be imported (error: {}). "
+				"Install pylink or set MOT_EYE_MODE=off."
+				.format(self.mode, _PYLINK_IMPORT_ERROR)
+			)
+		if self.mode == 'dummy':
+			self.tracker = pylink.EyeLink(None)
+		else:
+			self.tracker = pylink.EyeLink(self.host_ip)
+		self.tracker.openDataFile(self.edf_filename)
+		if self.log_edf and self.is_active():
+			self.tracker.sendCommand("add_file_preamble_text 'MOT polar-angle tracking'")
+		self.tracker.setOfflineMode()
+		if self.mode == 'live':
+			vstr = self.tracker.getTrackerVersionString()
 			try:
-				import pylink
-				pylink.closeGraphics()
+				self.eyelink_ver = int(vstr.split()[-1].split('.')[0])
+			except Exception:
+				self.eyelink_ver = 0
+		link_event_flags = 'LEFT,RIGHT,FIXATION,SACCADE,BLINK,BUTTON,FIXUPDATE,INPUT'
+		if self.eyelink_ver > 3:
+			link_sample_flags = 'LEFT,RIGHT,GAZE,GAZERES,AREA,HTARGET,STATUS,INPUT'
+		else:
+			link_sample_flags = 'LEFT,RIGHT,GAZE,GAZERES,AREA,STATUS,INPUT'
+		if self.log_edf:
+			file_event_flags = 'LEFT,RIGHT,FIXATION,SACCADE,BLINK,MESSAGE,BUTTON,INPUT'
+			if self.eyelink_ver > 3:
+				file_sample_flags = 'LEFT,RIGHT,GAZE,HREF,RAW,AREA,HTARGET,GAZERES,BUTTON,STATUS,INPUT'
+			else:
+				file_sample_flags = 'LEFT,RIGHT,GAZE,HREF,RAW,AREA,GAZERES,BUTTON,STATUS,INPUT'
+			self.tracker.sendCommand('file_event_filter = ' + file_event_flags)
+			self.tracker.sendCommand('file_sample_data  = ' + file_sample_flags)
+		self.tracker.sendCommand('link_event_filter = ' + link_event_flags)
+		self.tracker.sendCommand('link_sample_data  = ' + link_sample_flags)
+		self.tracker.sendCommand('calibration_type = ' + self.calibration_type)
+
+	def setup_graphics(self, win, fix_window_deg=1.5):
+		if not self.is_active():
+			return
+		self.scn_w, self.scn_h = win.size
+		self.fix_win_deg = float(fix_window_deg)
+		self.tracker.sendCommand('screen_pixel_coords = 0 0 {:d} {:d}'.format(self.scn_w - 1, self.scn_h - 1))
+		self.tracker.sendMessage('DISPLAY_COORDS 0 0 {:d} {:d}'.format(self.scn_w - 1, self.scn_h - 1))
+		if EyeLinkCoreGraphicsPsychoPy is None:
+			return
+		self.genv = EyeLinkCoreGraphicsPsychoPy(self.tracker, win)
+		self.genv.setCalibrationColors((-1, -1, -1), win.color)
+		self.genv.setTargetType('circle')
+		self.genv.setTargetSize(24)
+		self.genv.setCalibrationSounds('', '', '')
+		pylink.openGraphicsEx(self.genv)
+		px_per_cm = self.scn_w / float(DEFAULT_MONITOR_WIDTH_CM)
+		cm_per_deg = DEFAULT_MONITOR_DISTANCE_CM * np.tan(np.deg2rad(1.0))
+		self.fix_win_px = self.fix_win_deg * (px_per_cm * cm_per_deg)
+		self.fix_el_x = self.scn_w / 2.0
+		self.fix_el_y = self.scn_h / 2.0
+
+	def calibrate(self):
+		if not self.is_active():
+			return
+		try:
+			self.tracker.doTrackerSetup()
+		except RuntimeError as e:
+			print('EyeLink calibration error:', e)
+			try:
+				self.tracker.exitCalibration()
 			except Exception:
 				pass
 
-	def send_message(self, message):
-		if hasattr(self._tracker, 'sendMessage'):
-			self._tracker.sendMessage(message)
+	def drift_correct(self):
+		if not self.is_active():
+			return
+		try:
+			self.tracker.setOfflineMode()
+			self.tracker.sendCommand('clear_screen 0')
+			err = self.tracker.doDriftCorrect(int(self.fix_el_x), int(self.fix_el_y), 1, 1)
+			if err == pylink.ESC_KEY:
+				pass
+		except RuntimeError as e:
+			print('Drift correct error:', e)
 
-	def stop_recording(self):
-		if hasattr(self._tracker, 'stopEyeTracking'):
-			self._tracker.stopEyeTracking()
+	def start_trial(self, trial_id):
+		if not self.is_active():
+			return
+		self.tracker.setOfflineMode()
+		self.tracker.sendCommand('clear_screen 0')
+		self.tracker.sendMessage('TRIALID {:d}'.format(trial_id))
+		self.tracker.sendCommand("record_status_message 'Trial {:d}'".format(trial_id))
+		try:
+			file_rec = 1 if self.log_edf else 0
+			self.tracker.startRecording(file_rec, file_rec, 1, 1)
+		except RuntimeError as e:
+			print('startRecording error:', e)
+			return
+		pylink.pumpDelay(50)
+		eu = self.tracker.eyeAvailable()
+		if eu == 2:
+			eu = 0
+		self.eye_used = eu
+		if eu == 1:
+			self.tracker.sendMessage('EYE_USED 1 RIGHT')
+		else:
+			self.tracker.sendMessage('EYE_USED 0 LEFT')
+		self.tracker.sendMessage('TRIAL_START {:d}'.format(trial_id))
 
-	def close_connection(self, edf_name):
-		if hasattr(self._tracker, 'closeConnectionToEyeTracker'):
-			return self._tracker.closeConnectionToEyeTracker(edf_name)
-		return 'Eye tracking disabled'
+	def stop_trial(self, trial_id, result_code=0):
+		if not self.is_active():
+			return
+		if self.tracker.isConnected():
+			try:
+				self.tracker.sendMessage('TRIAL_END {:d}'.format(trial_id))
+				pylink.pumpDelay(50)
+				self.tracker.stopRecording()
+				self.tracker.sendMessage('TRIAL_RESULT {:d}'.format(result_code))
+			except Exception as e:
+				print('stop_trial error:', e)
+
+	def send_message(self, msg):
+		if not self.is_active():
+			return
+		try:
+			self.tracker.sendMessage(msg)
+		except Exception:
+			pass
+
+	def get_gaze(self, prev_sample):
+		"""Return (in_window, sample, distance_deg) for the latest EyeLink gaze sample."""
+		if not self.is_active():
+			return True, prev_sample, 0.0
+		try:
+			new_sample = self.tracker.getNewestSample()
+		except Exception:
+			return False, prev_sample, np.inf
+		if new_sample is None:
+			return False, prev_sample, np.inf
+		if prev_sample is not None and new_sample.getTime() == prev_sample.getTime():
+			return None, prev_sample, None
+		if self.eye_used == 1 and new_sample.isRightSample():
+			gx, gy = new_sample.getRightEye().getGaze()
+		elif self.eye_used == 0 and new_sample.isLeftSample():
+			gx, gy = new_sample.getLeftEye().getGaze()
+		else:
+			return False, new_sample, np.inf
+		miss = -32768
+		if gx == miss or gy == miss:
+			return False, new_sample, np.inf
+		dist_px = float(np.hypot(gx - self.fix_el_x, gy - self.fix_el_y))
+		px_per_deg = self.fix_win_px / self.fix_win_deg if self.fix_win_deg else np.inf
+		dist_deg = dist_px / px_per_deg if px_per_deg else np.inf
+		return (dist_deg <= self.fix_win_deg), new_sample, dist_deg
+
+	def close(self, output_dir='', base_name=''):
+		if not self.is_active():
+			return
+		if self.tracker.isConnected():
+			try:
+				if self.tracker.isRecording() == pylink.TRIAL_OK:
+					pylink.pumpDelay(100)
+					self.tracker.stopRecording()
+				self.tracker.setOfflineMode()
+				self.tracker.sendCommand('clear_screen 0')
+				pylink.msecDelay(500)
+				try:
+					self.tracker.closeDataFile()
+				except Exception as e:
+					print('EDF close error:', e)
+				if self.log_edf and output_dir and base_name:
+					local_edf = os.path.join(output_dir, base_name + '.EDF')
+					try:
+						self.tracker.receiveDataFile(self.edf_filename, local_edf)
+						print('EDF saved to:', local_edf)
+					except RuntimeError as e:
+						print('EDF transfer error:', e)
+				self.tracker.close()
+			except Exception as e:
+				print('EyeLink close error:', e)
+
+	# Compatibility aliases used by the existing MOT code path.
+	def start_recording(self, trial_num, calib_trial=True, widthPix=None, heightPix=None):
+		self.start_trial(trial_num)
+
+	def stop_recording(self, trial_num=None, result_code=0):
+		if trial_num is None:
+			trial_num = -1
+		self.stop_trial(trial_num, result_code=result_code)
 
 
-tracker = NullEyeTracker()
-
-if eyetracking:
-	try:
-		import pylink
-	except Exception as e:
-		print('EyeLink import failed:', e)
-		eyetracking = False
-
-if eyetracking:
-	try:
-		from eyetrackingCode import EyelinkHolcombeLabHelpers
-	except Exception as e:
-		print('Could not import Eyelink helper module:', e)
-		eyetracking = False
-
-
-def make_eye_tracker(win, trial_clock, subject_id, width_pix, height_pix):
-	if not eyetracking:
-		return NullEyeTracker()
-	try:
-		tracker_obj = EyelinkHolcombeLabHelpers.EyeLinkTrack_Holcombe(
-			win,
-			trial_clock,
-			subject_id[:4],
-			1,
-			'HV5',
-			(255, 255, 255),
-			(0, 0, 0),
-			False,
-			(width_pix, height_pix),
-		)
-		return EyeLinkTrackerAdapter(tracker_obj)
-	except Exception as e:
-		print('Could not create EyeLink tracker:', e)
-		return NullEyeTracker()
-
+tracker = None
 
 def draw_center_fixation(win, fixation, fixation_blank, fixation_point, frame_index=None):
 	"""Draw the centered fixation used in AH Circular-style trials."""
@@ -127,6 +294,30 @@ def draw_center_fixation(win, fixation, fixation_blank, fixation_point, frame_in
 		else:
 			fixation_blank.draw()
 	fixation_point.draw()
+
+
+def draw_status_banner(win, message):
+	panel = visual.Rect(
+		win,
+		width=80,
+		height=20,
+		fillColor=(0.2, 0.2, 0.2),
+		lineColor=(1, 1, 0),
+		lineWidth=4,
+		pos=(0, 0),
+		autoLog=False,
+	)
+	banner = visual.TextStim(
+		win,
+		text=message,
+		pos=(0, 0),
+		height=1.2,
+		color='yellow',
+		alignText='center',
+		wrapWidth=50,
+	)
+	panel.draw()
+	banner.draw()
 
 
 # Ensure data directory exists to match earlier messages and avoid warnings
@@ -240,18 +431,20 @@ def run_pre_experiment_screen_check(default_refresh_rate=100.0):
 		'Visualizer screen': default_viz_screen,
 		'Fullscreen': True,
 		'Screen refresh rate': float(default_refresh_rate),
+		'Log EDF File': EYE['log_edf'],
 		'Check refresh etc': True,
 	}
 
 	dlg = gui.DlgFromDict(
 		dictionary=settings,
 		title='MOT screen setup',
-		order=['Screen to use', 'Visualizer screen', 'Fullscreen', 'Screen refresh rate', 'Check refresh etc'],
+		order=['Screen to use', 'Visualizer screen', 'Fullscreen', 'Screen refresh rate', 'Log EDF File', 'Check refresh etc'],
 		tip={
 			'Screen to use': '0 means primary screen, 1 means second screen.',
 			'Visualizer screen': 'Usually 1 if a second monitor is attached; use 0 if only one screen is available.',
 			'Fullscreen': 'Recommended for accurate timing.',
 			'Screen refresh rate': 'Enter the intended monitor refresh rate in Hz.',
+			'Log EDF File': 'If checked, the experimenter logs and transfers an EDF file at shutdown.',
 			'Check refresh etc': 'Runs PsychoPy RuntimeInfo to estimate actual refresh timing before the experiment.',
 		},
 	)
@@ -270,6 +463,7 @@ def run_pre_experiment_screen_check(default_refresh_rate=100.0):
 
 	fullscr_requested = _as_bool(settings['Fullscreen'])
 	check_refresh = _as_bool(settings['Check refresh etc'])
+	EYE['log_edf'] = _as_bool(settings['Log EDF File'])
 	try:
 		chosen_refresh = float(settings['Screen refresh rate'])
 	except Exception:
@@ -491,6 +685,11 @@ def make_practice_trials(part_name, trial_specs):
 				'trialKind': 'practice',
 				'speed': practice_speed,
 			})
+	if part_name == 'Part2':
+		ellipse_trials = [trial for trial in trials if trial['condition'] == 'ellipse']
+		rotations = build_part2_ellipse_rotations(len(ellipse_trials))
+		for trial, rotation_rad in zip(ellipse_trials, rotations):
+			trial['ellipseRotationRad'] = rotation_rad
 	random.shuffle(trials)
 	return trials
 
@@ -523,13 +722,17 @@ def make_condition_staircase_states(part_name, trial_specs):
 					'stairStartSpeed': stair_start_speed,
 					'stairKey': stair_key,
 				})
+		if part_name == 'Part2' and spec['condition'] == 'ellipse':
+			ellipse_trials = list(state['queues'][1]) + list(state['queues'][2])
+			rotations = build_part2_ellipse_rotations(len(ellipse_trials))
+			for trial, rotation_rad in zip(ellipse_trials, rotations):
+				trial['ellipseRotationRad'] = rotation_rad
 		condition_states.append(state)
 	return condition_states
 
 
 def build_interleaved_stair_trials(part_name, trial_specs):
 	condition_states = make_condition_staircase_states(part_name, trial_specs)
-	state_by_condition_key = {state['conditionKey']: state for state in condition_states}
 
 	ordered_trials = []
 
@@ -541,20 +744,19 @@ def build_interleaved_stair_trials(part_name, trial_specs):
 	ordered_trials.extend(opening_round)
 
 	while True:
-		available_trials = []
-		for state in condition_states:
+		round_trials = []
+		round_order = list(condition_states)
+		random.shuffle(round_order)
+		for state in round_order:
 			next_staircase = state['next_staircase']
-			if state['queues'][next_staircase]:
-				available_trials.append(state['queues'][next_staircase][0])
-		if not available_trials:
+			if not state['queues'][next_staircase]:
+				continue
+			trial = state['queues'][next_staircase].popleft()
+			round_trials.append(trial)
+			state['next_staircase'] = 2 if next_staircase == 1 else 1
+		if not round_trials:
 			break
-
-		chosen_trial = random.choice(available_trials)
-		state = state_by_condition_key[chosen_trial['conditionKey']]
-		next_staircase = state['next_staircase']
-		trial = state['queues'][next_staircase].popleft()
-		ordered_trials.append(trial)
-		state['next_staircase'] = 2 if next_staircase == 1 else 1
+		ordered_trials.extend(round_trials)
 
 	attention_checks = make_attention_check_trials(part_name, trial_specs)
 	if attention_checks:
@@ -654,6 +856,62 @@ def activate_window(win):
 			handle.activate()
 	except Exception:
 		pass
+
+
+def show_text_screen(win, lines, key_list=None, height=0.8, wrap_width=40):
+	"""Show a centered multi-line text screen and wait for a response key."""
+	if key_list is None:
+		key_list = ['space', 'spacebar', 'escape']
+	activate_window(win)
+	event.clearEvents(eventType='keyboard')
+	kb = keyboard.Keyboard()
+	mouse = event.Mouse(win=win)
+	text = visual.TextStim(
+		win,
+		text='\n'.join(lines),
+		pos=(0, 0),
+		height=height,
+		color='white',
+		alignText='center',
+		wrapWidth=wrap_width,
+	)
+	text.draw()
+	win.flip()
+	if autoAdvance:
+		core.wait(0.75)
+		return 'auto'
+	while True:
+		keys = kb.getKeys(keyList=['space', 'escape'], waitRelease=False, clear=True)
+		if keys:
+			key_name = keys[0].name
+			if key_name == 'escape':
+				core.quit()
+			if key_name == 'space' or key_name in key_list:
+				return key_name
+		if mouse.getPressed()[0]:
+			return 'mouse'
+		core.wait(0.01)
+
+
+def update_fixation_monitor(eyetracker, prev_sample, last_in_window, consecutive_invalid):
+	"""Advance EyeLink fixation monitoring by one frame."""
+	if eyetracker is None or not eyetracker.is_active():
+		return False, prev_sample, last_in_window, consecutive_invalid, 0.0
+	in_window, sample, dist_deg = eyetracker.get_gaze(prev_sample)
+	if in_window is None:
+		in_window = last_in_window
+	else:
+		last_in_window = bool(in_window)
+	prev_sample = sample
+	if dist_deg is None:
+		dist_deg = np.inf
+	if not in_window:
+		consecutive_invalid += 1
+		if consecutive_invalid >= max(1, int(EYE['fix_break_consec_frames'])):
+			return True, prev_sample, last_in_window, consecutive_invalid, dist_deg
+	else:
+		consecutive_invalid = 0
+	return False, prev_sample, last_in_window, consecutive_invalid, dist_deg
 
 
 def get_visualizer_draw_size(win):
@@ -999,16 +1257,7 @@ def waveForm(type, speed, timeSeconds, numRing):
 				ans = -1 + 2 * round(np.random.rand(1)[0])
 			return ans
 		else:
-							# Only draw up to the most recent max_points_per_track values
-							vals_to_plot = values[-self.max_points_per_track:]
-							n_vals = len(vals_to_plot)
-							# Start index so that x axis always spans 0..max_points_per_track-1
-							start_idx = max(0, self.max_points_per_track - n_vals)
-							for i, speed in enumerate(vals_to_plot):
-								x_idx = start_idx + i
-								x = _x_for_index(x_idx)
-								y = _y_for_speed(speed)
-								points.append((x, y))
+			return 0
 
 def apply_visual_feedback(selected_idx, is_correct, x_pos, y_pos, blob_stim, fix):
 	"""
@@ -1083,6 +1332,18 @@ def rho_from_phi(phi, l, r):
 	return np.sqrt(l * l + r * r + 2.0 * l * r * np.cos(phi))
 
 
+def compute_condition_k(l, r, n_samples=10000):
+	phis = np.linspace(0.0, 2 * np.pi, n_samples, endpoint=True)
+	rho_vals = rho_from_phi(phis, l, r)
+	integral = np.trapezoid(1.0 / rho_vals, phis)
+	return (r / (2 * np.pi)) * integral
+
+
+def normalised_varying_phi_dot(phi, base_rps, l, r, k):
+	rho_val = rho_from_phi(phi, l, r)
+	return k * 2 * np.pi * base_rps * (rho_val / r)
+
+
 def phi_dot_log_eccentricity_base_speed(phi, base_rps, l, r):
 	"""
 	Varying-speed rule where base_rps is the speed the object would travel if the
@@ -1149,6 +1410,92 @@ def rotatePoint(x, y, angleRad):
 	s = sin(angleRad)
 	return x * c - y * s, x * s + y * c
 
+
+PART2_SINE_CIRCLE_AMPLITUDE_DEG = 0.7
+PART2_SINE_CIRCLE_LOBES = 12
+PART2_SINE_CIRCLE_PHASE = 0.0
+PART2_ELLIPSE_ASPECT_RATIO = 1.6
+PART2_ELLIPSE_ROTATION_RAD = pi / 4.0
+PART2_DIAMOND_ROTATION_RAD = 0.0
+
+
+def build_part2_ellipse_rotations(count):
+	rotations = [PART2_ELLIPSE_ROTATION_RAD] * (count // 2)
+	rotations.extend([PART2_ELLIPSE_ROTATION_RAD + (np.pi / 2.0)] * (count - len(rotations)))
+	random.shuffle(rotations)
+	return rotations
+
+
+def update_part2_theta(theta, speed, direction, dt):
+	theta_step = direction * 2 * np.pi * speed * dt
+	theta = (theta + theta_step) % (2 * np.pi)
+	return theta, theta_step
+
+
+def part2_circle_radius(radius_deg, theta):
+	return radius_deg
+
+
+def part2_sine_circle_radius(radius_deg, theta, amplitude_deg=PART2_SINE_CIRCLE_AMPLITUDE_DEG,
+							 lobes=PART2_SINE_CIRCLE_LOBES, phase=PART2_SINE_CIRCLE_PHASE):
+	return radius_deg + amplitude_deg * np.sin(lobes * theta + phase)
+
+
+def part2_ellipse_axes_matching_circle_circumference(circleRadius, aspectRatio=PART2_ELLIPSE_ASPECT_RATIO):
+	aRaw = circleRadius * aspectRatio
+	bRaw = circleRadius / aspectRatio
+	targetCirc = 2 * pi * circleRadius
+	h = ((aRaw - bRaw) ** 2) / ((aRaw + bRaw) ** 2)
+	rawCirc = pi * (aRaw + bRaw) * (1 + ((3 * h) / (10 + np.sqrt(4 - 3 * h))))
+	if rawCirc <= 0:
+		return circleRadius, circleRadius
+	scale = targetCirc / rawCirc
+	return aRaw * scale, bRaw * scale
+
+
+def part2_ellipse_radius(circleRadius, theta, aspectRatio=PART2_ELLIPSE_ASPECT_RATIO,
+						 rotationRad=PART2_ELLIPSE_ROTATION_RAD):
+	a, b = part2_ellipse_axes_matching_circle_circumference(circleRadius, aspectRatio)
+	delta = theta - rotationRad
+	denominator = np.sqrt((b ** 2) * (np.cos(delta) ** 2) + (a ** 2) * (np.sin(delta) ** 2))
+	if denominator <= 0:
+		return circleRadius
+	return (a * b) / denominator
+
+
+def part2_diamond_radius(radius_deg, theta, rotationRad=PART2_DIAMOND_ROTATION_RAD):
+	delta = theta - rotationRad
+	denominator = abs(np.cos(delta)) + abs(np.sin(delta))
+	if denominator <= 0:
+		return radius_deg
+	return radius_deg / denominator
+
+
+def part2_trajectory_radius(basicShape, radius_deg, theta, ellipse_rotation_rad=None):
+	if basicShape == 'circle':
+		return part2_circle_radius(radius_deg, theta)
+	if basicShape == 'diamond':
+		return part2_diamond_radius(radius_deg, theta)
+	if basicShape == 'sine_circle':
+		return part2_sine_circle_radius(radius_deg, theta)
+	if basicShape == 'ellipse':
+		rotation_rad = PART2_ELLIPSE_ROTATION_RAD if ellipse_rotation_rad is None else ellipse_rotation_rad
+		return part2_ellipse_radius(radius_deg, theta, rotationRad=rotation_rad)
+	return part2_circle_radius(radius_deg, theta)
+
+
+def part2_trajectory_xy(basicShape, radius_deg, theta, ellipse_rotation_rad=None):
+	radius = part2_trajectory_radius(basicShape, radius_deg, theta, ellipse_rotation_rad=ellipse_rotation_rad)
+	return radius * cos(theta), radius * sin(theta), radius
+
+
+def part2_motion_frame(basicShape, radius_deg, theta_target, speed, direction, dt, ellipse_rotation_rad=None):
+	theta_target, theta_step = update_part2_theta(theta_target, speed, direction, dt)
+	theta_distractor = (theta_target + np.pi) % (2 * np.pi)
+	x1, y1, radius1 = part2_trajectory_xy(basicShape, radius_deg, theta_target, ellipse_rotation_rad=ellipse_rotation_rad)
+	x2, y2, radius2 = part2_trajectory_xy(basicShape, radius_deg, theta_distractor, ellipse_rotation_rad=ellipse_rotation_rad)
+	return theta_target, theta_distractor, theta_step, x1, y1, radius1, x2, y2, radius2
+
 def circle_xy(radius_deg, angle_rad, timeSeconds=None, speed=None, numRing=0):
 	# allow optional temporal radius modulation
 	r = radius_deg
@@ -1160,57 +1507,26 @@ def circle_xy(radius_deg, angle_rad, timeSeconds=None, speed=None, numRing=0):
 	return rThis * cos(angle_rad), rThis * sin(angle_rad)
 
 def sine_circle_xy(radius_deg, angle_rad, amp=0.25):
-	# match practice-file sine-wave circle geometry
-	sineCircleAmplitudeDeg = 0.7
-	sineCircleLobes = 12
-	r = radius_deg + sineCircleAmplitudeDeg * np.sin(sineCircleLobes * angle_rad)
+	r = part2_sine_circle_radius(radius_deg, angle_rad)
 	return r * cos(angle_rad), r * sin(angle_rad)
 
 def ellipse_xy(circleRadius, angle_rad):
-	ellipseAspectRatio = 1.6
-	ellipseRotationRad = pi / 4.0
-	def ellipseCircumferenceApprox(a, b):
-		h = ((a - b) ** 2) / ((a + b) ** 2)
-		return pi * (a + b) * (1 + ((3 * h) / (10 + np.sqrt(4 - 3 * h))))
-	def ellipseAxesMatchingCircleCircumference(circleRadius, aspectRatio):
-		aRaw = circleRadius * aspectRatio
-		bRaw = circleRadius / aspectRatio
-		targetCirc = 2 * pi * circleRadius
-		rawCirc = ellipseCircumferenceApprox(aRaw, bRaw)
-		if rawCirc <= 0:
-			return circleRadius, circleRadius
-		scale = targetCirc / rawCirc
-		return aRaw * scale, bRaw * scale
-	a, b = ellipseAxesMatchingCircleCircumference(circleRadius, ellipseAspectRatio)
-	xUnrot = a * cos(angle_rad)
-	yUnrot = b * sin(angle_rad)
-	return rotatePoint(xUnrot, yUnrot, ellipseRotationRad)
+	r = part2_ellipse_radius(circleRadius, angle_rad)
+	return r * cos(angle_rad), r * sin(angle_rad)
 
 def diamond_xy(radius_deg, angle_rad):
-	# match practice-file diamond trajectory geometry
-	x, y = squareShape(angle_rad)
-	x, y = rotatePoint(x, y, pi / 4.0)
-	return radius_deg * x, radius_deg * y
+	r = part2_diamond_radius(radius_deg, angle_rad)
+	return r * cos(angle_rad), r * sin(angle_rad)
 
 
-def draw_trajectory(myWin, basicShape, radius_deg, cx, cy, num_points=120):
+def draw_trajectory(myWin, basicShape, radius_deg, cx, cy, num_points=120, ellipse_rotation_rad=None):
 	"""
 	Draw the actual trajectory (white line) that objects traveled during the trial.
 	"""
 	trajectory_points = []
 	for i in range(num_points):
 		angle_rad = 2 * np.pi * i / num_points
-		
-		if basicShape == 'circle':
-			x, y = circle_xy(radius_deg, angle_rad)
-		elif basicShape == 'diamond':
-			x, y = diamond_xy(radius_deg, angle_rad)
-		elif basicShape == 'sine_circle':
-			x, y = sine_circle_xy(radius_deg, angle_rad)
-		elif basicShape == 'ellipse':
-			x, y = ellipse_xy(radius_deg, angle_rad)
-		else:
-			x, y = circle_xy(radius_deg, angle_rad)
+		x, y, _ = part2_trajectory_xy(basicShape, radius_deg, angle_rad, ellipse_rotation_rad=ellipse_rotation_rad)
 		
 		# Apply offset
 		x += cx
@@ -1227,6 +1543,55 @@ def draw_trajectory(myWin, basicShape, radius_deg, cx, cy, num_points=120):
 		closeShape=True
 	)
 	# trajectory_line.draw()
+
+
+def validate_part2_motion_rules():
+	"""Cheap consistency checks for the Part 2 polar-motion helpers."""
+	shape_list = ['circle', 'diamond', 'sine_circle', 'ellipse']
+	base_theta = 0.37
+	base_radius = 6.0
+	sample_dt = 1.0 / 120.0
+	speed = 1.0
+
+	_, theta_step = update_part2_theta(base_theta, speed, 1, sample_dt)
+	if not np.isclose(theta_step / sample_dt, 2 * np.pi * speed):
+		raise AssertionError('Part 2 angular increment does not equal 2πf')
+
+	theta = base_theta
+	for _ in range(120):
+		theta, _ = update_part2_theta(theta, speed, 1, sample_dt)
+	if not np.isclose(((theta - base_theta) % (2 * np.pi)), 0.0, atol=1e-9):
+		raise AssertionError('1 rps does not complete one full polar rotation in 1 second')
+
+	for shape in shape_list:
+		for theta_sample in np.linspace(0.0, 2 * np.pi, 24, endpoint=False):
+			x, y, radius = part2_trajectory_xy(shape, base_radius, theta_sample)
+			if not np.isclose(np.hypot(x, y), radius, atol=1e-9):
+				raise AssertionError(f'{shape} point is not on the intended radial boundary')
+
+		theta_distractor = (base_theta + np.pi) % (2 * np.pi)
+		if not np.isclose(((theta_distractor - base_theta) % (2 * np.pi)), np.pi, atol=1e-12):
+			raise AssertionError('Target and distractor are not separated by π radians')
+
+		if shape == 'diamond':
+			for corner in (0.0, np.pi / 2.0, np.pi, 3 * np.pi / 2.0):
+				eps = 1e-6
+				x_lo, y_lo, _ = part2_trajectory_xy(shape, base_radius, corner - eps)
+				x_hi, y_hi, _ = part2_trajectory_xy(shape, base_radius, corner + eps)
+				if np.hypot(x_hi - x_lo, y_hi - y_lo) > 1e-3:
+					raise AssertionError('Diamond trajectory is discontinuous near a corner')
+
+	practice_theta = 1.25
+	main_theta = 1.25
+	practice_seq = []
+	main_seq = []
+	for _ in range(10):
+		practice_theta, _, _, px, py, pr, _, _, _ = part2_motion_frame('ellipse', base_radius, practice_theta, 0.75, 1, sample_dt)
+		main_theta, _, _, mx, my, mr, _, _, _ = part2_motion_frame('ellipse', base_radius, main_theta, 0.75, 1, sample_dt)
+		practice_seq.append((practice_theta, px, py, pr))
+		main_seq.append((main_theta, mx, my, mr))
+	if not np.allclose(np.asarray(practice_seq), np.asarray(main_seq), atol=1e-12):
+		raise AssertionError('Practice and main Part 2 motion do not match')
 
 
 def build_session():
@@ -1275,6 +1640,13 @@ def build_speed_staircases():
 def run_checks_and_report(trials_by_part):
 	# Check radii for circular trajectories
 	circle_radius_ok = (abs(radii[0] - 6.0) < 1e-6)
+	part2_motion_ok = True
+	part2_motion_error = None
+	try:
+		validate_part2_motion_rules()
+	except Exception as exc:
+		part2_motion_ok = False
+		part2_motion_error = str(exc)
 
 	# Trial counts
 	counts = {k: len(v) for k, v in trials_by_part.items()}
@@ -1303,6 +1675,9 @@ def run_checks_and_report(trials_by_part):
 
 	print('\n=== MOT_pilot verification report ===')
 	print('Circular radii set to 6 deg:', circle_radius_ok)
+	print('Part 2 polar-motion validation passed:', part2_motion_ok)
+	if not part2_motion_ok:
+		print('  Part 2 validation error:', part2_motion_error)
 	for pname in counts:
 		expected = expected_part_counts[pname]
 		print(f"{pname}: {counts[pname]} trials (expected {expected})")
@@ -1317,6 +1692,7 @@ def run_checks_and_report(trials_by_part):
 			condition_trials = [t for t in stair_trials if t.get('conditionKey') == spec['stairKey']]
 			condition_sequence = [t['staircaseIndex'] for t in condition_trials]
 			expected_sequence = [1, 2] * stair_trials_per_staircase
+			print('  sequence counts for', spec['stairKey'], '->', {'stair1': condition_sequence.count(1), 'stair2': condition_sequence.count(2)})
 			if condition_sequence != expected_sequence:
 				print('  sequence mismatch for', spec['stairKey'], '->', condition_sequence[:10], '...')
 
@@ -1340,6 +1716,8 @@ def run_checks_and_report(trials_by_part):
 
 	if not circle_radius_ok:
 		issues.append('Circular radius not 6 deg')
+	if not part2_motion_ok:
+		issues.append(part2_motion_error or 'Part 2 motion validation failed')
 
 	if issues:
 		print('\nIssues detected:')
@@ -1388,6 +1766,8 @@ if __name__ == '__main__':
 	dlgLabelsOrdered.append('subject')
 	myDlg.addField('session:', session, tip='a,b,c,')
 	dlgLabelsOrdered.append('session')
+	myDlg.addField('Auto advance prompts and responses', autoAdvance)
+	dlgLabelsOrdered.append('autoAdvance')
 	myDlg.addText('To abort, press ESC at a trial response screen', color='DimGrey')
 	myDlg.show()
 	if myDlg.OK:
@@ -1397,6 +1777,7 @@ if __name__ == '__main__':
 			subject = name
 		sessionEntered = thisInfo[dlgLabelsOrdered.index('session')]
 		session = str(sessionEntered)
+		autoAdvance = bool(thisInfo[dlgLabelsOrdered.index('autoAdvance')])
 	else:
 		print('User cancelled from dialog box.')
 		core.quit()
@@ -1410,6 +1791,19 @@ if __name__ == '__main__':
 		dataDir='.'
 	datafileName = dataDir+'/'+subject+ '_' + str(session) + '_MOT_pilot_'+timeAndDateStr
 	dataFile = open(datafileName+'.tsv', 'w')
+	tracker = EyeLinkSession(
+		mode=EYE['mode'],
+		edf_basename=f'EyeTrack_{subject}_{session}_{timeAndDateStr}',
+		host_ip=EYE['host_ip'],
+		calibration_type=EYE['calibration_type'],
+		log_edf=EYE['log_edf'],
+	)
+	try:
+		tracker.open()
+	except Exception as e:
+		print('EyeLink open() failed:', e)
+		tracker = EyeLinkSession(mode='off', edf_basename='MOT_off', host_ip=EYE['host_ip'], calibration_type=EYE['calibration_type'], log_edf=False)
+		print('Continuing without eye tracking.')
 
 	# -------------------- Full experiment run (display, timing, response collection) --------------------
 	# Minimal window setup (matches practice units)
@@ -1450,9 +1844,35 @@ if __name__ == '__main__':
 	fixationPoint = visual.Circle(myWin, radius=0.08, fillColor=(1, 1, 1), lineColor=None, autoLog=False)
 	blobStim = visual.Circle(myWin, radius=0.6, fillColor=(1, -1, -1), lineColor=None)
 	blobStim2 = visual.Circle(myWin, radius=0.6, fillColor=(-1, 1, -1), lineColor=None)
+	myWin.mouseVisible = True
 	stairWin = create_staircase_window(screen_index=viz_screen_index, fullscr=fullscr, win_size=viz_win_size)
 	stairViz = StaircaseVisualizer(stairWin) if stairWin is not None else None
 	show_staircase_startup(stairWin)
+	tracker.setup_graphics(myWin, fix_window_deg=EYE['fixation_window_deg'])
+	if not tracker.is_active():
+		print('Eye tracker unavailable; experiment will run without eyetracking.')
+	if tracker.is_active():
+		show_text_screen(
+			myWin,
+			[
+				'Eye tracker setup',
+				'',
+				'Make sure the participant is seated and the tracker camera has a clear view.',
+				'',
+				'Press SPACE to continue to calibration.',
+			],
+		)
+		show_text_screen(
+			myWin,
+			[
+				'Eye tracker calibration',
+				'',
+				'Press Space -> Enter to start calibration',
+				'',
+				'Press Escape here when calibration is complete.',
+			],
+		)
+		tracker.calibrate()
 
 	# Trial timing
 	cueFrames = int(refreshRate * trackingExtraTime)
@@ -1465,6 +1885,19 @@ if __name__ == '__main__':
 	# Eccentricities used for trajectory centers
 	trajectory_center_x_deg = [0.0, 5.0, 10.0]
 	trajectory_center_y_deg = [0.0, 0.0, 0.0]
+	part1_varying_normaliser_geometry = {
+		'near_displaced': float(abs(trajectory_center_x_deg[1])),
+		'far_displaced': float(abs(trajectory_center_x_deg[2])),
+	}
+	part1_varying_normaliser_by_condition = {
+		condition: compute_condition_k(l, radii[0])
+		for condition, l in part1_varying_normaliser_geometry.items()
+	}
+	for condition, l in part1_varying_normaliser_geometry.items():
+		print(
+			f"DEBUG: Part1 varying-speed normaliser | condition={condition} | "
+			f"l={l:.3f} | r={radii[0]:.3f} | k={part1_varying_normaliser_by_condition[condition]:.6f}"
+		)
 
 	results = []
 	identicalBlobColor = np.array([1, -1, -1])
@@ -1472,9 +1905,8 @@ if __name__ == '__main__':
 	# distractor during cue interval (red), flash colors for feedback
 	distractorCueColor = np.array([1, -1, -1])
 	trialClock = core.Clock()
-	tracker = make_eye_tracker(myWin, trialClock, subject, widthPix, heightPix)
-	if eyetracking:
-		EDF_fname_local = f'EyeTrack_{subject}_{session}_{timeAndDateStr}.EDF'
+	EDF_fname_local = tracker.edf_filename if tracker is not None and tracker.is_active() else None
+	if EDF_fname_local is not None:
 		logging.info(f'Eye-tracking enabled; EDF filename={EDF_fname_local}')
 	speed_staircases = build_speed_staircases()
 
@@ -1484,7 +1916,7 @@ if __name__ == '__main__':
 		'trialnum', 'subject', 'session', 'part', 'condition', 'basicShape', 'numObjects', 'speed', 'motionRule', 'trialKind',
 		'staircaseIndex', 'staircaseWithinCondition', 'stairKey', 'stairStartSpeed', 'stairValue',
 		'initialAngle', 'initialOtherAngle', 'cueFrames', 'timingCheckFrames',
-		'eyetrackingEnabled', 'fixatnPeriodFrames', 'trajectorySide', 'trajectoryOffsetDeg', 'correct', 'trialDurTotal', 'numTargets', 'whichIsTarget',
+		'eyetrackingEnabled', 'fixatnPeriodFrames', 'trajectorySide', 'trajectoryOffsetDeg', 'ellipseRotationRad', 'correct', 'trialOutcome', 'trialExcluded', 'fixBreakFrame', 'fixBreakDistanceDeg', 'trialDurTotal', 'numTargets', 'whichIsTarget',
 		'reversal_count', 'timingBlips', 'numLongFramesAfterCue'
 	]
 	# add reversal columns
@@ -1518,19 +1950,41 @@ if __name__ == '__main__':
 		if message is None:
 			message = 'Please take a short break. Press SPACE to continue.'
 		# create a centered text stimulus for the break screen
+		kb = keyboard.Keyboard()
+		mouse = event.Mouse(win=myWin)
 		break_text = visual.TextStim(myWin, text=message, color=(1, 1, 1), height=0.8, wrapWidth=40)
 		break_text.draw()
 		myWin.flip()
+		if autoAdvance:
+			core.wait(0.75)
+			return
 		# wait until space is pressed
 		while True:
-			keys = event.waitKeys()
-			if not keys:
-				continue
-			if 'space' in keys or 'spacebar' in keys:
+			keys = kb.getKeys(keyList=['space', 'escape'], waitRelease=False, clear=True)
+			if keys and keys[0].name == 'escape':
+				core.quit()
+			if keys and keys[0].name == 'space':
 				core.wait(0.1)
 				break
-			if 'escape' in keys:
-				core.quit()
+			if mouse.getPressed()[0]:
+				break
+			core.wait(0.01)
+
+	def show_eye_tracker_practice_screen():
+		"""Give the participant a final eye-tracker handoff before practice starts."""
+		if not tracker.is_active():
+			return
+		show_text_screen(
+			myWin,
+			[
+				'Eye tracker check',
+				'',
+				'Keep looking at the central fixation dot.',
+				'',
+				'Press SPACE to begin the practice trials.',
+			],
+		)
+		tracker.drift_correct()
 
 	def get_balanced_trajectory_side(offset_side_counts, condition):
 		"""Assign left/right sides for off-fixation Part 1 trials while keeping the split balanced."""
@@ -1555,6 +2009,7 @@ if __name__ == '__main__':
 		part_specs = get_part_trial_specs(part_name)
 		practice_trials = make_practice_trials(part_name, part_specs)
 		if practice_trials:
+			show_eye_tracker_practice_screen()
 			practice_round = 1
 			while True:
 				print(f"Running {len(practice_trials)} practice trials for {part_name}")
@@ -1585,6 +2040,9 @@ if __name__ == '__main__':
 						cx = 0.0
 						cy = 0.0
 						basicShape = cond
+						trajectory_side = 'center'
+						offset_deg = 0.0
+						ellipse_rotation_rad = practice_trial.get('ellipseRotationRad', PART2_ELLIPSE_ROTATION_RAD) if basicShape == 'ellipse' else None
 					
 					# Starting angles (two objects opposite)
 					currTargetAngle = random.random() * 2 * pi
@@ -1601,6 +2059,13 @@ if __name__ == '__main__':
 					trialnum = len(results)
 					trial_start_time = trialClock.getTime()
 					ts = []
+					trial_excluded = False
+					trial_outcome = 'ok'
+					fix_break_frame = -999
+					fix_break_distance_deg = -999.0
+					prev_sample = None
+					last_in_window = True
+					consecutive_invalid = 0
 					fixatnMinDur = 0.8
 					fixatnVariableDur = 0.5
 					fixatnPeriodFrames = int((fixatnMinDur + random.random() * fixatnVariableDur) * refreshRate)
@@ -1616,6 +2081,12 @@ if __name__ == '__main__':
 					tracker.send_message(f'Fixation pre-stimulus period of {fixatnPeriodFrames * refreshRate} now ending for trialnum={trialnum}')
 					
 					# Frame loop (identical to main loop)
+					part2_motion_log_enabled = (
+						part_name == 'Part2'
+						and practice_trial.get('trialKind', 'practice') != 'staircase'
+					)
+					prev_motion_theta = currTargetAngle
+					prev_motion_xy = None
 					for frameN in range(trialDurFrames):
 						timeSec = frameN / refreshRate
 						if part_name == 'Part1' and basicShape == 'circle' and motion_rule == 'varying':
@@ -1634,30 +2105,39 @@ if __name__ == '__main__':
 							x1, y1 = circle_xy(r, currPhi[0], timeSec, base_rps, 0)
 							x2, y2 = circle_xy(r, currPhi[1], timeSec, base_rps, 0)
 						else:
-							angleStep = direction * speed * 2 * pi / refreshRate
-							if basicShape == 'diamond':
-								perimeter = radii[0] * 4.0
-								circum = 2 * pi * radii[0]
-								angleStep = angleStep * (perimeter / circum)
-							
-							currTargetAngle = (currTargetAngle + angleStep) % (2 * pi)
-							distractorAngle = (distractorAngle + angleStep) % (2 * pi)
-							
-							if basicShape == 'circle':
-								x1, y1 = circle_xy(radii[0], currTargetAngle, timeSec, speed, 0)
-								x2, y2 = circle_xy(radii[0], distractorAngle, timeSec, speed, 0)
-							elif basicShape == 'diamond':
-								x1, y1 = diamond_xy(radii[0], currTargetAngle)
-								x2, y2 = diamond_xy(radii[0], distractorAngle)
-							elif basicShape == 'sine_circle':
-								x1, y1 = sine_circle_xy(radii[0], currTargetAngle)
-								x2, y2 = sine_circle_xy(radii[0], distractorAngle)
-							elif basicShape == 'ellipse':
-								x1, y1 = ellipse_xy(radii[0], currTargetAngle)
-								x2, y2 = ellipse_xy(radii[0], distractorAngle)
-							else:
-								x1, y1 = circle_xy(radii[0], currTargetAngle)
-								x2, y2 = circle_xy(radii[0], distractorAngle)
+							dt = 1.0 / refreshRate
+							currTargetAngle, distractorAngle, theta_step, x1, y1, radius1, x2, y2, radius2 = part2_motion_frame(
+								basicShape,
+								radii[0],
+								currTargetAngle,
+								speed,
+								direction,
+									dt,
+									ellipse_rotation_rad=ellipse_rotation_rad,
+							)
+							if part2_motion_log_enabled:
+								if prev_motion_xy is None:
+									linear_disp_dva_s = 0.0
+								else:
+									linear_disp_dva_s = np.hypot(x1 - prev_motion_xy[0], y1 - prev_motion_xy[1]) / dt
+								theta_delta = ((currTargetAngle - prev_motion_theta + np.pi) % (2 * np.pi)) - np.pi
+								print(
+									f"PART2_MOTION_LOG practice trial={trialnum} condition={basicShape} nominal_rps={speed:.6f} "
+									f"theta={currTargetAngle:.6f} dtheta={theta_delta:.6f} dtheta_dt={(theta_step / dt):.6f} "
+									f"radius={radius1:.6f} xy=({x1:.6f},{y1:.6f}) linear_dva_s={linear_disp_dva_s:.6f}"
+								)
+								prev_motion_theta = currTargetAngle
+								prev_motion_xy = (x1, y1)
+
+						fix_broke, prev_sample, last_in_window, consecutive_invalid, dist_deg = update_fixation_monitor(
+							tracker, prev_sample, last_in_window, consecutive_invalid
+						)
+						if fix_broke:
+							trial_excluded = True
+							trial_outcome = 'excluded'
+							fix_break_frame = frameN
+							fix_break_distance_deg = float(dist_deg if dist_deg is not None else -999.0)
+							break
 						
 						if next_reversal_idx < len(reversal_times) and timeSec > reversal_times[next_reversal_idx]:
 							direction *= -1
@@ -1694,12 +2174,46 @@ if __name__ == '__main__':
 						
 						myWin.flip()
 						ts.append(trialClock.getTime() - trial_start_time)
+
+					if trial_excluded:
+						show_text_screen(
+							myWin,
+							[
+								'Fixation off.',
+								'',
+								'Please keep looking at the central fixation dot.',
+								'',
+								'Press Space to continue.',
+							],
+						)
+
+					if trial_excluded:
+						tracker.stop_trial(trialnum, result_code=1)
+						trialDurTotal = trialClock.getTime() - trial_start_time
+						reversal_str = '\t'.join([str(round(r, 4)) for r in reversal_times])
+						if len(reversal_times) < 10:
+							reversal_str += '\t' + '\t'.join(['-999'] * (10 - len(reversal_times)))
+						print(trialnum, subject, session, part_name, cond, basicShape, 2, speed, motion_rule, 'practice',
+							 0, 'n/a', '-999', -999, -999,
+							 round(initialAngle, 4), round(initialOtherAngle, 4),
+							 cueFrames, timingCheckFrames,
+								 int(tracker.is_active()), fixatnPeriodFrames, trajectory_side, round(abs(offset_deg), 4), round(float(ellipse_rotation_rad), 4) if ellipse_rotation_rad is not None else -999, -999, trial_outcome, 1, fix_break_frame, round(float(fix_break_distance_deg), 4), round(trialDurTotal, 3), 1, target_idx,
+							 len(reversal_times), 0, 0,
+							 sep='\t', end='\t', file=dataFile)
+						print(reversal_str, file=dataFile)
+						dataFile.flush()
+						results.append({'part': part_name, 'condition': cond, 'motionRule': motion_rule, 'trialKind': 'practice', 'speed': speed, 'stairValue': -999, 'staircaseIndex': 0, 'staircaseWithinCondition': 'n/a', 'stairKey': '-999', 'correct': False, 'excluded': True, 'trialOutcome': trial_outcome, 'trajectorySide': trajectory_side, 'trajectoryOffsetDeg': round(abs(offset_deg), 4)})
+						continue
 					
 					tracker.send_message(f'response_prompt_trial={trialnum}')
 					# Response collection
 					resp = None
 					correct = False
 					mouse = event.Mouse(win=myWin)
+					try:
+						mouse.setVisible(True)
+					except Exception:
+						myWin.mouseVisible = True
 					clicked = False
 					if autoAdvance:
 						clicked = True
@@ -1724,7 +2238,7 @@ if __name__ == '__main__':
 							blobStim2.setLineColor(None, log=False)
 							blobStim.setPos((x1, y1)); blobStim.draw()
 							blobStim2.setPos((x2, y2)); blobStim2.draw()
-							draw_trajectory(myWin, basicShape, radii[0], cx, cy)
+							draw_trajectory(myWin, basicShape, radii[0], cx, cy, ellipse_rotation_rad=ellipse_rotation_rad)
 							myWin.flip()
 							if mouse.getPressed()[0]:
 								mx, my = mouse.getPos()
@@ -1773,7 +2287,7 @@ if __name__ == '__main__':
 						  0, 'n/a', '-999', -999, -999,
 						  round(initialAngle, 4), round(initialOtherAngle, 4),
 						  cueFrames, timingCheckFrames,
-						  int(eyetracking), fixatnPeriodFrames, trajectory_side, round(abs(offset_deg), 4), int(correct), round(trialDurTotal, 3), 1, target_idx,
+								int(tracker.is_active()), fixatnPeriodFrames, trajectory_side, round(abs(offset_deg), 4), round(float(ellipse_rotation_rad), 4) if ellipse_rotation_rad is not None else -999, int(correct), round(trialDurTotal, 3), 1, target_idx,
 					      len(reversal_times), timing_blips, num_long_frames_after_cue,
 						  sep='\t', end='\t', file=dataFile)
 					print(reversal_str, file=dataFile)
@@ -1790,18 +2304,18 @@ if __name__ == '__main__':
 				)
 				practice_done_text.draw()
 				myWin.flip()
+				if autoAdvance:
+					core.wait(0.75)
+					break
 				while True:
-					keys = event.waitKeys(keyList=['r', 'space', 'spacebar', 'escape'])
-					if not keys:
-						continue
-					if 'escape' in keys:
-						core.quit()
+					keys = event.getKeys(keyList=['r', 'space', 'spacebar'])
 					if 'r' in keys:
 						practice_round += 1
 						restart_practice = True
 						break
 					if 'space' in keys or 'spacebar' in keys:
 						break
+					core.wait(0.01)
 				if not restart_practice:
 					break
 		
@@ -1845,10 +2359,14 @@ if __name__ == '__main__':
 					cx = offset_deg if trajectory_side == 'right' else -offset_deg
 				cy = 0.0
 				basicShape = 'circle'
+				ellipse_rotation_rad = None
 			else:  # Part2 shapes
 				cx = 0.0
 				cy = 0.0
 				basicShape = cond  # 'diamond','sine_circle','ellipse'
+				trajectory_side = 'center'
+				offset_deg = 0.0
+				ellipse_rotation_rad = thisTrial.get('ellipseRotationRad', PART2_ELLIPSE_ROTATION_RAD) if basicShape == 'ellipse' else None
 
 			if trial_kind == 'attention_check':
 				speed = attention_check_speed
@@ -1891,6 +2409,19 @@ if __name__ == '__main__':
 			tracker.send_message(f'Fixation pre-stimulus period of {fixatnPeriodFrames * refreshRate} now ending for trialnum={trialnum}')
 
 			# frame loop
+			trial_excluded = False
+			trial_outcome = 'ok'
+			fix_break_frame = -999
+			fix_break_distance_deg = -999.0
+			prev_sample = None
+			last_in_window = True
+			consecutive_invalid = 0
+			part2_motion_log_enabled = (
+				part_name == 'Part2'
+				and trial_kind != 'staircase'
+			)
+			prev_motion_theta = currTargetAngle
+			prev_motion_xy = None
 			for frameN in range(trialDurFrames):
 				timeSec = frameN / refreshRate
 				if part_name == 'Part1' and basicShape == 'circle' and motion_rule == 'varying':
@@ -1900,59 +2431,72 @@ if __name__ == '__main__':
 					l = float(cx)
 					base_rps = speed
 					r = radii[0]
+					k_condition = part1_varying_normaliser_by_condition.get(cond, 1.0)
+					side_label = 'center' if cx == 0 else ('right' if cx > 0 else 'left')
 
 					# Precompute trial-level debug values on first frame.
 					if frameN == 0:
-						phi_samples = np.linspace(0, 2 * np.pi, 360, endpoint=False)
+						phi_samples = np.linspace(0, 2 * np.pi, 10000, endpoint=False)
 						trial_rhos = rho_from_phi(phi_samples, l, r)
-						trial_phi_dots = phi_dot_log_eccentricity_base_speed(phi_samples, base_rps, l, r)
+						trial_phi_dots = normalised_varying_phi_dot(phi_samples, base_rps, l, r, k_condition)
+						trial_inst_rps = trial_phi_dots / (2 * np.pi)
+						estimated_revolution_duration = np.trapezoid(1.0 / trial_phi_dots, phi_samples)
+						estimated_effective_rps = 1.0 / estimated_revolution_duration if estimated_revolution_duration > 0 else 0.0
 						print(
-							f"DEBUG: Part 2 varying-speed trial {ti+1} | condition={cond} | "
-							f"base_rps={base_rps:.3f} | l={l:.3f} | r={r:.3f} | "
+							f"DEBUG: Part1 normalised varying-speed trial {ti+1} | condition={cond} | "
+							f"base_rps={base_rps:.3f} | side={side_label} | cx={cx:.3f} | l={l:.3f} | r={r:.3f} | "
+							f"k={k_condition:.6f} | "
 							f"min_rho={np.min(trial_rhos):.6f} | max_rho={np.max(trial_rhos):.6f} | "
-							f"min_phi_dot={np.min(trial_phi_dots):.6f} | max_phi_dot={np.max(trial_phi_dots):.6f}"
+							f"min_inst_rps={np.min(trial_inst_rps):.6f} | max_inst_rps={np.max(trial_inst_rps):.6f} | "
+							f"estimated_revolution_duration={estimated_revolution_duration:.6f} | "
+							f"estimated_effective_rps={estimated_effective_rps:.6f}"
 						)
 
 					# Update object 1 (target) independently
-					phi_dot_0 = phi_dot_log_eccentricity_base_speed(currPhi[0], base_rps, l, r)
+					phi_dot_0 = normalised_varying_phi_dot(currPhi[0], base_rps, l, r, k_condition)
 					# Calculate angle (phi) it should be at after moving for dt seconds, applying direction for reversals
 					currPhi[0] = (currPhi[0] + direction * phi_dot_0 * dt) % (2 * np.pi)
 
 					# Update object 2 (distractor) independently
-					phi_dot_1 = phi_dot_log_eccentricity_base_speed(currPhi[1], base_rps, l, r)
+					phi_dot_1 = normalised_varying_phi_dot(currPhi[1], base_rps, l, r, k_condition)
 					currPhi[1] = (currPhi[1] + direction * phi_dot_1 * dt) % (2 * np.pi)
 
 					x1, y1 = circle_xy(r, currPhi[0], timeSec, base_rps, 0)
 					x2, y2 = circle_xy(r, currPhi[1], timeSec, base_rps, 0)
 				else:
-					# Parts 1 & 3: Both objects move together at the same angular speed
-					angleStep = direction * speed * 2 * pi / refreshRate
-					# adjust speed for diamond as in practice
-					if basicShape == 'diamond':
-						perimeter = radii[0] * 4.0
-						circum = 2 * pi * radii[0]
-						angleStep = angleStep * (perimeter / circum)
+					dt = 1.0 / refreshRate
+					currTargetAngle, distractorAngle, theta_step, x1, y1, radius1, x2, y2, radius2 = part2_motion_frame(
+						basicShape,
+						radii[0],
+						currTargetAngle,
+						speed,
+						direction,
+						dt,
+							ellipse_rotation_rad=ellipse_rotation_rad,
+					)
+					if part2_motion_log_enabled:
+						if prev_motion_xy is None:
+							linear_disp_dva_s = 0.0
+						else:
+							linear_disp_dva_s = np.hypot(x1 - prev_motion_xy[0], y1 - prev_motion_xy[1]) / dt
+						theta_delta = ((currTargetAngle - prev_motion_theta + np.pi) % (2 * np.pi)) - np.pi
+						print(
+							f"PART2_MOTION_LOG main trial={trialnum} kind={trial_kind} condition={basicShape} nominal_rps={speed:.6f} "
+							f"theta={currTargetAngle:.6f} dtheta={theta_delta:.6f} dtheta_dt={(theta_step / dt):.6f} "
+							f"radius={radius1:.6f} xy=({x1:.6f},{y1:.6f}) linear_dva_s={linear_disp_dva_s:.6f}"
+						)
+						prev_motion_theta = currTargetAngle
+						prev_motion_xy = (x1, y1)
 
-					currTargetAngle = (currTargetAngle + angleStep) % (2 * pi)
-					#Calculate angle of the distractor (distractorAngle) which is always pi radians away from the target, then apply same angleStep for reversals
-					distractorAngle = (distractorAngle + angleStep) % (2 * pi)
-
-					# compute positions depending on shape
-					if basicShape == 'circle':
-						x1, y1 = circle_xy(radii[0], currTargetAngle, timeSec, speed, 0)
-						x2, y2 = circle_xy(radii[0], distractorAngle, timeSec, speed, 0)
-					elif basicShape == 'diamond':
-						x1, y1 = diamond_xy(radii[0], currTargetAngle)
-						x2, y2 = diamond_xy(radii[0], distractorAngle)
-					elif basicShape == 'sine_circle':
-						x1, y1 = sine_circle_xy(radii[0], currTargetAngle)
-						x2, y2 = sine_circle_xy(radii[0], distractorAngle)
-					elif basicShape == 'ellipse':
-						x1, y1 = ellipse_xy(radii[0], currTargetAngle)
-						x2, y2 = ellipse_xy(radii[0], distractorAngle)
-					else:
-						x1, y1 = circle_xy(radii[0], currTargetAngle)
-						x2, y2 = circle_xy(radii[0], distractorAngle)
+						fix_broke, prev_sample, last_in_window, consecutive_invalid, dist_deg = update_fixation_monitor(
+							tracker, prev_sample, last_in_window, consecutive_invalid
+						)
+						if fix_broke:
+							trial_excluded = True
+							trial_outcome = 'excluded'
+							fix_break_frame = frameN
+							fix_break_distance_deg = float(dist_deg if dist_deg is not None else -999.0)
+							break
 
 				if next_reversal_idx < len(reversal_times) and timeSec > reversal_times[next_reversal_idx]:
 					direction *= -1
@@ -1995,12 +2539,34 @@ if __name__ == '__main__':
 				myWin.flip()
 				ts.append(trialClock.getTime() - trial_start_time)
 
+			if trial_excluded:
+				tracker.stop_trial(trialnum, result_code=1)
+				trialDurTotal = trialClock.getTime() - trial_start_time
+				reversal_str = '\t'.join([str(round(r, 4)) for r in reversal_times])
+				if len(reversal_times) < 10:
+					reversal_str += '\t' + '\t'.join(['-999'] * (10 - len(reversal_times)))
+				print(trialnum, subject, session, part_name, cond, basicShape, 2, speed, motion_rule, trial_kind,
+					staircase_index, staircase_label, stair_key, stair_start_speed, stair_value,
+					round(initialAngle, 4), round(initialOtherAngle, 4),
+					cueFrames, timingCheckFrames,
+					int(tracker.is_active()), fixatnPeriodFrames, trajectory_side, round(abs(offset_deg), 4), round(float(ellipse_rotation_rad), 4) if ellipse_rotation_rad is not None else -999, -999, trial_outcome, 1, fix_break_frame, round(float(fix_break_distance_deg), 4), round(trialDurTotal, 3), 1, target_idx,
+					len(reversal_times), 0, 0,
+					sep='\t', end='\t', file=dataFile)
+				print(reversal_str, file=dataFile)
+				dataFile.flush()
+				results.append({'part': part_name, 'condition': cond, 'motionRule': motion_rule, 'trialKind': trial_kind, 'speed': speed, 'stairValue': stair_value, 'staircaseIndex': staircase_index, 'staircaseWithinCondition': staircase_label, 'stairKey': stair_key, 'correct': False, 'excluded': True, 'trialOutcome': trial_outcome, 'trajectorySide': trajectory_side, 'trajectoryOffsetDeg': round(abs(offset_deg), 4)})
+				continue
+
 			tracker.send_message(f'response_prompt_trial={trialnum}')
 			# response collection: ask participant to click the target
 			# draw the objects continuously while waiting so they remain visible
 			resp = None
 			correct = False
 			mouse = event.Mouse(win=myWin)
+			try:
+				mouse.setVisible(True)
+			except Exception:
+				myWin.mouseVisible = True
 			clicked = False
 			if autoAdvance:
 				clicked = True
@@ -2012,7 +2578,7 @@ if __name__ == '__main__':
 				blobStim2.setLineColor(None, log=False)
 				blobStim.setPos((x1, y1)); blobStim.draw()
 				blobStim2.setPos((x2, y2)); blobStim2.draw()
-				draw_trajectory(myWin, basicShape, radii[0], cx, cy)
+				draw_trajectory(myWin, basicShape, radii[0], cx, cy, ellipse_rotation_rad=ellipse_rotation_rad)
 				myWin.flip()
 				# provide visual feedback for auto-advance trials as if correct
 				apply_global_flash(True, blobStim, blobStim2, fixation)
@@ -2026,7 +2592,7 @@ if __name__ == '__main__':
 					blobStim2.setLineColor(None, log=False)
 					blobStim.setPos((x1, y1)); blobStim.draw()
 					blobStim2.setPos((x2, y2)); blobStim2.draw()
-					draw_trajectory(myWin, basicShape, radii[0], cx, cy)
+					draw_trajectory(myWin, basicShape, radii[0], cx, cy, ellipse_rotation_rad=ellipse_rotation_rad)
 					myWin.flip()
 					if mouse.getPressed()[0]:
 						mx, my = mouse.getPos()
@@ -2100,7 +2666,7 @@ if __name__ == '__main__':
 				  staircase_index, staircase_label, stair_key, stair_start_speed, stair_value,
 				  round(initialAngle, 4), round(initialOtherAngle, 4),
 				  cueFrames, timingCheckFrames,
-				  int(eyetracking), fixatnPeriodFrames, trajectory_side, round(abs(offset_deg), 4), int(correct), round(trialDurTotal, 3), 1, target_idx,
+					int(tracker.is_active()), fixatnPeriodFrames, trajectory_side, round(abs(offset_deg), 4), round(float(ellipse_rotation_rad), 4) if ellipse_rotation_rad is not None else -999, int(correct), round(trialDurTotal, 3), 1, target_idx,
 				  len(reversal_times), timing_blips, num_long_frames_after_cue,
 				  sep='\t', end='\t', file=dataFile)
 			print(reversal_str, file=dataFile)
@@ -2114,15 +2680,28 @@ if __name__ == '__main__':
 	if 'part2' in parts_to_run:
 		run_part('Part2', trials['part2'])
 
+	show_text_screen(
+		myWin,
+		[
+			'Thank you for taking part in the study.',
+			'',
+			'This is the end of the study.',
+			'',
+			'Please notify your experimenter now.',
+		],
+	)
+
 	if tracker is not None:
 		try:
-			tracker.close_connection(EDF_fname_local if EDF_fname_local is not None else '')
+			tracker.close(output_dir=dataDir, base_name=f'{subject}_{session}_{timeAndDateStr}')
 		except Exception as e:
 			logging.info(f'EyeLink close error: {e}')
 
 	# Final summary
-	n_correct = sum(1 for r in results if r['correct'])
+	n_correct = sum(1 for r in results if r['correct'] and not r.get('excluded', False))
+	n_excluded = sum(1 for r in results if r.get('excluded', False))
 	print('\nExperiment complete. Total correct:', n_correct, 'out of', len(results))
+	print('Excluded trials:', n_excluded)
 	print('Results saved to:', datafileName+'.tsv')
 	dataFile.close()
 	myWin.close()

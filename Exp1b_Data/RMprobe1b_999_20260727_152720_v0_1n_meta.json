@@ -1,0 +1,180 @@
+{
+  "exp_date": "20260727",
+  "exp_time": "152720",
+  "participant": "999",
+  "age": "999",
+  "pid_index": 999,
+  "demo_mode": 0,
+  "sanity_check_mode": false,
+  "counterbalance": {
+    "color_idx": 0,
+    "probe_color": "blue",
+    "block_order_idx": 3,
+    "block_order": [
+      "soa_300",
+      "smooth",
+      "soa_200",
+      "soa_100"
+    ],
+    "block_order_str": "soa_300->smooth->soa_200->soa_100"
+  },
+  "hardware": {
+    "resolution": [
+      1920,
+      1080
+    ],
+    "fullscreen": true,
+    "refresh_hz": 144,
+    "mac_safe_flip": true,
+    "scr_width_cm": 59.7,
+    "viewing_dist_cm": 57.0
+  },
+  "stim": {
+    "bar_width": 20,
+    "bar_height": 100,
+    "bar_speed_px_per_sec": 600.0,
+    "fg_color": "white",
+    "bg_color": [
+      -0.2,
+      -0.2,
+      -0.2
+    ]
+  },
+  "timing": {
+    "pre_fix_sec": 1.5,
+    "iti_sec": 1.0,
+    "retention_sec": 0.25
+  },
+  "radius_px": 120,
+  "n_polar_angles": 6,
+  "soa_conditions": [
+    {
+      "label": "smooth",
+      "on_ms": 7.0,
+      "off_ms": 0.0
+    },
+    {
+      "label": "soa_100",
+      "on_ms": 50.0,
+      "off_ms": 50.0
+    },
+    {
+      "label": "soa_200",
+      "on_ms": 100.0,
+      "off_ms": 100.0
+    },
+    {
+      "label": "soa_300",
+      "on_ms": 150.0,
+      "off_ms": 150.0
+    }
+  ],
+  "soa_frame_table": {
+    "smooth": {
+      "on_dur_ms_nominal": 7.0,
+      "off_dur_ms_nominal": 0.0,
+      "on_frames": 1,
+      "off_frames": 0,
+      "soa_frames": 1,
+      "soa_ms_actual": 6.944444444444445
+    },
+    "soa_100": {
+      "on_dur_ms_nominal": 50.0,
+      "off_dur_ms_nominal": 50.0,
+      "on_frames": 7,
+      "off_frames": 7,
+      "soa_frames": 14,
+      "soa_ms_actual": 97.22222222222223
+    },
+    "soa_200": {
+      "on_dur_ms_nominal": 100.0,
+      "off_dur_ms_nominal": 100.0,
+      "on_frames": 14,
+      "off_frames": 14,
+      "soa_frames": 28,
+      "soa_ms_actual": 194.44444444444446
+    },
+    "soa_300": {
+      "on_dur_ms_nominal": 150.0,
+      "off_dur_ms_nominal": 150.0,
+      "on_frames": 22,
+      "off_frames": 22,
+      "soa_frames": 44,
+      "soa_ms_actual": 305.55555555555554
+    }
+  },
+  "d_init_pools": {
+    "smooth": [
+      360,
+      540,
+      720,
+      900
+    ],
+    "soa_100": [
+      360,
+      540,
+      720,
+      900
+    ],
+    "soa_200": [
+      360,
+      540,
+      720,
+      900
+    ],
+    "soa_300": [
+      360,
+      540,
+      720,
+      900
+    ]
+  },
+  "staircase": {
+    "seeds": {
+      "A": 60.0,
+      "B": -60.0
+    },
+    "steps": [
+      45.0,
+      27.0,
+      17.0,
+      10.0
+    ],
+    "tighten_after_reversals": [
+      4,
+      5,
+      6,
+      7
+    ],
+    "bounds": [
+      -150.0,
+      150.0
+    ],
+    "max_reversals_per_track": 22,
+    "max_trials_per_condition": 150
+  },
+  "eye": {
+    "mode": "live",
+    "host_ip": "100.1.1.1",
+    "fixation_window_deg": 3.0,
+    "fix_break_consec_frames": 7,
+    "pre_offset_monitor_ms": 200.0,
+    "post_offset_monitor_ms": 200.0,
+    "edf_basename": "rm1b",
+    "log_edf": false,
+    "missing_sentinel": -32768.0,
+    "calibration_type": "HV9"
+  },
+  "response_keys": {
+    "left": "f",
+    "right": "k",
+    "quit": "escape",
+    "continue": "space"
+  },
+  "block_order": [
+    "soa_300",
+    "smooth",
+    "soa_200",
+    "soa_100"
+  ]
+}
