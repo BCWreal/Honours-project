@@ -10,7 +10,7 @@ Parts:
 
 General rules enforced:
  - 2 objects per trial (1 target, 1 distractor)
- - Two interleaved staircases per condition, 25 trials each
+ - Two interleaved staircases per condition, 22 trials each
  - Adaptive staircase on speed across a 1.5 to 2.2 rps range
  - 5 fixed 0.5 rps attention-check trials per condition
  - Part 1: 5 conditions total = 275 trials including attention checks
@@ -35,7 +35,7 @@ import atexit
 # Eye-tracking integration based on the Exp1b session wrapper.
 eyetracking = True
 
-HAS_PYLINK = False
+HAS_PYLINK = True
 _PYLINK_IMPORT_ERROR = None
 try:
 	import pylink
@@ -53,13 +53,31 @@ def _default_eye_mode():
 	return 'off'
 
 
+def score_click_response(mx, my, x_target, y_target, x_distractor, y_distractor, choice_radius_deg):
+	"""Score a click using a radius-based hit test, then fall back to center distance."""
+	radius_sq = float(choice_radius_deg) ** 2
+	d_target = (mx - x_target) ** 2 + (my - y_target) ** 2
+	d_distractor = (mx - x_distractor) ** 2 + (my - y_distractor) ** 2
+	target_hit = d_target <= radius_sq
+	distractor_hit = d_distractor <= radius_sq
+	if target_hit and not distractor_hit:
+		picked = 0
+	elif distractor_hit and not target_hit:
+		picked = 1
+	elif target_hit and distractor_hit:
+		picked = 0 if d_target <= d_distractor else 1
+	else:
+		picked = 0 if d_target < d_distractor else 1
+	return picked, d_target, d_distractor, target_hit, distractor_hit
+
+
 EYE = {
 	'mode': os.environ.get('MOT_EYE_MODE', _default_eye_mode()).strip().lower(),
 	'host_ip': os.environ.get('MOT_EYE_HOST_IP', '100.1.1.1'),
 	'calibration_type': os.environ.get('MOT_EYE_CALIBRATION_TYPE', 'HV9'),
 	'log_edf': os.environ.get('MOT_EYE_LOG_EDF', '1').strip().lower() in ('1', 'true', 'yes', 'y', 'on'),
 	'fixation_window_deg': float(os.environ.get('MOT_EYE_FIXATION_WINDOW_DEG', '3.0')),
-	'fix_break_consec_frames': int(os.environ.get('MOT_EYE_FIX_BREAK_CONSEC_FRAMES', '1')),
+	'fix_break_consec_frames': int(os.environ.get('MOT_EYE_FIX_BREAK_CONSEC_FRAMES', '7')),
 }
 if not HAS_PYLINK:
 	EYE['mode'] = 'off'
@@ -140,17 +158,21 @@ class EyeLinkSession:
 		self.tracker.sendMessage('DISPLAY_COORDS 0 0 {:d} {:d}'.format(self.scn_w - 1, self.scn_h - 1))
 		if EyeLinkCoreGraphicsPsychoPy is None:
 			return
-		self.genv = EyeLinkCoreGraphicsPsychoPy(self.tracker, win)
-		self.genv.setCalibrationColors((-1, -1, -1), win.color)
-		self.genv.setTargetType('circle')
-		self.genv.setTargetSize(24)
-		self.genv.setCalibrationSounds('', '', '')
-		pylink.openGraphicsEx(self.genv)
-		px_per_cm = self.scn_w / float(DEFAULT_MONITOR_WIDTH_CM)
-		cm_per_deg = DEFAULT_MONITOR_DISTANCE_CM * np.tan(np.deg2rad(1.0))
-		self.fix_win_px = self.fix_win_deg * (px_per_cm * cm_per_deg)
-		self.fix_el_x = self.scn_w / 2.0
-		self.fix_el_y = self.scn_h / 2.0
+		try:
+			self.genv = EyeLinkCoreGraphicsPsychoPy(self.tracker, win, disableAudio=True)
+			self.genv.setCalibrationColors((-1, -1, -1), win.color)
+			self.genv.setTargetType('circle')
+			self.genv.setTargetSize(24)
+			self.genv.setCalibrationSounds('', '', '')
+			pylink.openGraphicsEx(self.genv)
+			sx = self.scn_w / float(DEFAULT_MONITOR_WIDTH_CM)
+			cm_per_deg = DEFAULT_MONITOR_DISTANCE_CM * np.tan(np.deg2rad(1.0))
+			self.fix_win_px = self.fix_win_deg * (sx * cm_per_deg)
+			self.fix_el_x = self.scn_w / 2.0
+			self.fix_el_y = self.scn_h / 2.0
+		except Exception as exc:
+			print('EyeLink graphics setup failed; continuing without calibration graphics:', exc)
+			self.genv = None
 
 	def calibrate(self):
 		if not self.is_active():
@@ -221,30 +243,34 @@ class EyeLinkSession:
 			pass
 
 	def get_gaze(self, prev_sample):
-		"""Return (in_window, sample, distance_deg) for the latest EyeLink gaze sample."""
+		"""Return (status, sample, distance_deg) for the latest EyeLink gaze sample."""
 		if not self.is_active():
-			return True, prev_sample, 0.0
+			return 'in_window', prev_sample, 0.0
 		try:
 			new_sample = self.tracker.getNewestSample()
 		except Exception:
-			return False, prev_sample, np.inf
+			return 'tracking_lost', prev_sample, None
 		if new_sample is None:
-			return False, prev_sample, np.inf
+			return 'tracking_lost', prev_sample, None
 		if prev_sample is not None and new_sample.getTime() == prev_sample.getTime():
-			return None, prev_sample, None
+			return 'no_new_sample', prev_sample, None
 		if self.eye_used == 1 and new_sample.isRightSample():
 			gx, gy = new_sample.getRightEye().getGaze()
 		elif self.eye_used == 0 and new_sample.isLeftSample():
 			gx, gy = new_sample.getLeftEye().getGaze()
 		else:
-			return False, new_sample, np.inf
+			return 'tracking_lost', new_sample, None
 		miss = -32768
 		if gx == miss or gy == miss:
-			return False, new_sample, np.inf
+			return 'tracking_lost', new_sample, None
 		dist_px = float(np.hypot(gx - self.fix_el_x, gy - self.fix_el_y))
 		px_per_deg = self.fix_win_px / self.fix_win_deg if self.fix_win_deg else np.inf
 		dist_deg = dist_px / px_per_deg if px_per_deg else np.inf
-		return (dist_deg <= self.fix_win_deg), new_sample, dist_deg
+		if not np.isfinite(dist_deg):
+			return 'tracking_lost', new_sample, None
+		if dist_deg <= self.fix_win_deg:
+			return 'in_window', new_sample, dist_deg
+		return 'outside_window', new_sample, dist_deg
 
 	def close(self, output_dir='', base_name=''):
 		if not self.is_active():
@@ -605,7 +631,7 @@ stair_nUp = 1
 stair_nDown = 3
 stair_stepSizes = [.3, .3, .2, .1, .1, .05]
 stair_start = 1.85
-stair_trials_per_staircase = 25
+stair_trials_per_staircase = 22
 stair_trials_per_condition = stair_trials_per_staircase * 2
 attention_check_trials_per_condition = 5
 attention_check_speed = 0.2
@@ -861,7 +887,7 @@ def activate_window(win):
 def show_text_screen(win, lines, key_list=None, height=0.8, wrap_width=40):
 	"""Show a centered multi-line text screen and wait for a response key."""
 	if key_list is None:
-		key_list = ['space', 'spacebar', 'escape']
+		key_list = ['space', 'spacebar']
 	activate_window(win)
 	event.clearEvents(eventType='keyboard')
 	kb = keyboard.Keyboard()
@@ -881,11 +907,13 @@ def show_text_screen(win, lines, key_list=None, height=0.8, wrap_width=40):
 		core.wait(0.75)
 		return 'auto'
 	while True:
-		keys = kb.getKeys(keyList=['space', 'escape'], waitRelease=False, clear=True)
+		keys = kb.getKeys(keyList=['space', 'escape', 'q'], waitRelease=False, clear=True)
 		if keys:
 			key_name = keys[0].name
-			if key_name == 'escape':
+			if key_name == 'q':
 				core.quit()
+			if key_name == 'escape' and 'escape' in key_list:
+				return key_name
 			if key_name == 'space' or key_name in key_list:
 				return key_name
 		if mouse.getPressed()[0]:
@@ -893,25 +921,172 @@ def show_text_screen(win, lines, key_list=None, height=0.8, wrap_width=40):
 		core.wait(0.01)
 
 
-def update_fixation_monitor(eyetracker, prev_sample, last_in_window, consecutive_invalid):
+def show_brief_message(win, text, duration_sec=0.9, color='orange'):
+	"""Show a short participant-facing message without waiting for input."""
+	activate_window(win)
+	message = visual.TextStim(
+		win,
+		text=text,
+		color=color,
+		height=0.8,
+		wrapWidth=40,
+		autoLog=False,
+	)
+	message.draw()
+	win.flip()
+	core.wait(duration_sec)
+
+def make_fixation_monitor_state():
+	"""Create per-trial fixation/tracking-loss counters for the motion period."""
+	return {
+		'consecutive_outside_frames': 0,
+		'consecutive_tracking_lost_frames': 0,
+		'total_tracking_lost_frames': 0,
+		'max_consecutive_tracking_lost_frames': 0,
+		'tracking_loss_events': 0,
+		'first_tracking_loss_frame': -999,
+		'last_tracking_loss_frame': -999,
+		'tracking_loss_active': False,
+		'tracking_loss_start_frame': -999,
+		'consecutive_outside_frames_at_abort': 0,
+		'tracking_loss_flag': 0,
+	}
+
+
+def reset_fixation_monitor_for_motion(fix_state):
+	"""Reset counters immediately before motion begins."""
+	fix_state['consecutive_outside_frames'] = 0
+	fix_state['consecutive_tracking_lost_frames'] = 0
+	fix_state['total_tracking_lost_frames'] = 0
+	fix_state['max_consecutive_tracking_lost_frames'] = 0
+	fix_state['tracking_loss_events'] = 0
+	fix_state['first_tracking_loss_frame'] = -999
+	fix_state['last_tracking_loss_frame'] = -999
+	fix_state['tracking_loss_active'] = False
+	fix_state['tracking_loss_start_frame'] = -999
+	fix_state['consecutive_outside_frames_at_abort'] = 0
+	fix_state['tracking_loss_flag'] = 0
+
+
+def finalize_tracking_loss_event(fix_state, trialnum=None, tracker=None, final_frame=None):
+	"""Close any active tracking-loss event and emit a trial summary message."""
+	if fix_state['tracking_loss_active']:
+		start_frame = fix_state['tracking_loss_start_frame']
+		last_frame = fix_state['last_tracking_loss_frame']
+		duration_frames = 0 if start_frame < 0 or last_frame < 0 else (last_frame - start_frame + 1)
+		if tracker is not None and trialnum is not None:
+			tracker.send_message(
+				f'TRACKING_LOSS_END trial={trialnum} frame={last_frame} duration_frames={duration_frames}'
+			)
+		fix_state['tracking_loss_active'] = False
+		fix_state['tracking_loss_start_frame'] = -999
+	fix_state['tracking_loss_flag'] = int(
+		fix_state['max_consecutive_tracking_lost_frames'] >= max(1, int(EYE['fix_break_consec_frames']))
+	)
+	if tracker is not None and trialnum is not None:
+		if final_frame is None:
+			final_frame = -999
+		tracker.send_message(
+			f'TRACKING_LOSS_SUMMARY trial={trialnum} final_frame={final_frame} '
+			f'total_frames={fix_state["total_tracking_lost_frames"]} '
+			f'max_consecutive={fix_state["max_consecutive_tracking_lost_frames"]} '
+			f'events={fix_state["tracking_loss_events"]}'
+		)
+
+
+def fixation_monitor_summary_fields(fix_state, fixation_abort=False):
+	"""Return TSV-ready tracking-loss summary values for the current trial."""
+	tracking_loss_flag = int(
+		fix_state['max_consecutive_tracking_lost_frames'] >= max(1, int(EYE['fix_break_consec_frames']))
+	)
+	return (
+		tracking_loss_flag,
+		int(fix_state['total_tracking_lost_frames']),
+		int(fix_state['max_consecutive_tracking_lost_frames']),
+		int(fix_state['tracking_loss_events']),
+		int(fix_state['first_tracking_loss_frame']),
+		int(fix_state['last_tracking_loss_frame']),
+		int(fix_state['consecutive_outside_frames_at_abort']) if fixation_abort else 0,
+	)
+
+
+def apply_gaze_status_to_fixation_state(status, distance_deg, fix_state, count_motion_frames=True, frame_idx=None, trialnum=None, tracker=None):
+	"""Update fixation and tracking-loss counters from a gaze status."""
+	fixation_abort = False
+	if not count_motion_frames:
+		return fixation_abort, status, distance_deg, fix_state
+
+	if status == 'tracking_lost':
+		fix_state['consecutive_outside_frames'] = 0
+		fix_state['consecutive_tracking_lost_frames'] += 1
+		fix_state['total_tracking_lost_frames'] += 1
+		if fix_state['first_tracking_loss_frame'] == -999 and frame_idx is not None:
+			fix_state['first_tracking_loss_frame'] = int(frame_idx)
+		if frame_idx is not None:
+			fix_state['last_tracking_loss_frame'] = int(frame_idx)
+		if fix_state['consecutive_tracking_lost_frames'] == 1:
+			fix_state['tracking_loss_events'] += 1
+			fix_state['tracking_loss_active'] = True
+			fix_state['tracking_loss_start_frame'] = int(frame_idx) if frame_idx is not None else -999
+			if tracker is not None and trialnum is not None:
+				tracker.send_message(
+					f'TRACKING_LOSS_START trial={trialnum} frame={frame_idx}'
+				)
+		if fix_state['consecutive_tracking_lost_frames'] > fix_state['max_consecutive_tracking_lost_frames']:
+			fix_state['max_consecutive_tracking_lost_frames'] = fix_state['consecutive_tracking_lost_frames']
+		return fixation_abort, status, distance_deg, fix_state
+
+	if status == 'no_new_sample':
+		return fixation_abort, status, distance_deg, fix_state
+
+	if fix_state['tracking_loss_active']:
+		if tracker is not None and trialnum is not None:
+			start_frame = fix_state['tracking_loss_start_frame']
+			last_frame = fix_state['last_tracking_loss_frame']
+			duration_frames = 0 if start_frame < 0 or last_frame < 0 else (last_frame - start_frame + 1)
+			tracker.send_message(
+				f'TRACKING_LOSS_END trial={trialnum} frame={last_frame} duration_frames={duration_frames}'
+			)
+		fix_state['tracking_loss_active'] = False
+		fix_state['tracking_loss_start_frame'] = -999
+	fix_state['consecutive_tracking_lost_frames'] = 0
+
+	if status == 'outside_window':
+		if fix_state['consecutive_outside_frames'] == 0 and tracker is not None and trialnum is not None:
+			tracker.send_message(
+				f'FIXATION_OUTSIDE_START trial={trialnum} frame={frame_idx} distance_deg={distance_deg}'
+			)
+		fix_state['consecutive_outside_frames'] += 1
+		if fix_state['consecutive_outside_frames'] >= max(1, int(EYE['fix_break_consec_frames'])):
+			fixation_abort = True
+			fix_state['consecutive_outside_frames_at_abort'] = fix_state['consecutive_outside_frames']
+			if tracker is not None and trialnum is not None:
+				tracker.send_message(
+					f'FIXATION_ABORT trial={trialnum} frame={frame_idx} '
+					f'consecutive_outside={fix_state["consecutive_outside_frames"]} distance_deg={distance_deg}'
+				)
+	else:
+		fix_state['consecutive_outside_frames'] = 0
+
+	return fixation_abort, status, distance_deg, fix_state
+
+
+def update_fixation_monitor(eyetracker, prev_sample, fix_state, count_motion_frames=True, frame_idx=None, trialnum=None, tracker=None):
 	"""Advance EyeLink fixation monitoring by one frame."""
 	if eyetracker is None or not eyetracker.is_active():
-		return False, prev_sample, last_in_window, consecutive_invalid, 0.0
-	in_window, sample, dist_deg = eyetracker.get_gaze(prev_sample)
-	if in_window is None:
-		in_window = last_in_window
-	else:
-		last_in_window = bool(in_window)
+		return False, prev_sample, 'in_window', 0.0, fix_state
+	status, sample, dist_deg = eyetracker.get_gaze(prev_sample)
 	prev_sample = sample
-	if dist_deg is None:
-		dist_deg = np.inf
-	if not in_window:
-		consecutive_invalid += 1
-		if consecutive_invalid >= max(1, int(EYE['fix_break_consec_frames'])):
-			return True, prev_sample, last_in_window, consecutive_invalid, dist_deg
-	else:
-		consecutive_invalid = 0
-	return False, prev_sample, last_in_window, consecutive_invalid, dist_deg
+	fixation_abort, status, dist_deg, fix_state = apply_gaze_status_to_fixation_state(
+		status,
+		dist_deg,
+		fix_state,
+		count_motion_frames=count_motion_frames,
+		frame_idx=frame_idx,
+		trialnum=trialnum,
+		tracker=tracker,
+	)
+	return fixation_abort, prev_sample, status, dist_deg, fix_state
 
 
 def get_visualizer_draw_size(win):
@@ -1594,6 +1769,65 @@ def validate_part2_motion_rules():
 		raise AssertionError('Practice and main Part 2 motion do not match')
 
 
+def validate_fixation_monitoring_logic():
+	"""Validate that tracking loss and fixation drift are handled separately."""
+	def run_sequence(sequence):
+		fix_state = make_fixation_monitor_state()
+		fixation_abort = False
+		for frame_idx, (status, distance_deg) in enumerate(sequence):
+			fixation_abort, _, _, fix_state = apply_gaze_status_to_fixation_state(
+				status,
+				distance_deg,
+				fix_state,
+				count_motion_frames=True,
+				frame_idx=frame_idx,
+				trialnum=1,
+				tracker=None,
+			)
+			if fixation_abort:
+				break
+		fixation_monitor_summary_fields(fix_state, fixation_abort=fixation_abort)
+		return fixation_abort, fix_state
+
+	# 1. Eight consecutive missing samples: tracking-loss flag true; no abort.
+	abort, state = run_sequence([('tracking_lost', None)] * 8)
+	if abort:
+		raise AssertionError('Tracking loss alone should not abort the trial')
+	if state['tracking_loss_flag'] != 1 or state['total_tracking_lost_frames'] != 8:
+		raise AssertionError('Tracking-loss summary failed for eight missing samples')
+
+	# 2. Six outside, one missing, two outside: missing sample breaks the outside streak.
+	abort, state = run_sequence(
+		[('outside_window', 4.0)] * 6 + [('tracking_lost', None)] + [('outside_window', 4.0)] * 2
+	)
+	if abort:
+		raise AssertionError('Missing sample should break the outside-fixation streak')
+	if state['consecutive_outside_frames'] != 2:
+		raise AssertionError('Outside-fixation streak was not reset by tracking loss')
+
+	# 3. Seven consecutive valid samples outside 3 dva: abort.
+	abort, state = run_sequence([('outside_window', 4.0)] * 7)
+	if not abort:
+		raise AssertionError('Seven consecutive outside-window samples should abort the trial')
+	if state['consecutive_outside_frames_at_abort'] != 7:
+		raise AssertionError('Abort streak length was not recorded correctly')
+
+	# 4. Blink for ten frames followed by valid gaze inside the window: no abort, loss duration logged.
+	abort, state = run_sequence([('tracking_lost', None)] * 10 + [('in_window', 1.0)])
+	if abort:
+		raise AssertionError('Blink-only tracking loss should not abort the trial')
+	if state['total_tracking_lost_frames'] != 10 or state['max_consecutive_tracking_lost_frames'] != 10:
+		raise AssertionError('Tracking-loss duration was not logged correctly')
+
+	# 5. Alternating inside/outside never aborts unless outside is consecutive.
+	abort, state = run_sequence([
+		('in_window', 1.0), ('outside_window', 4.0), ('tracking_lost', None), ('in_window', 1.0),
+		('outside_window', 4.0), ('in_window', 1.0), ('outside_window', 4.0), ('in_window', 1.0),
+	])
+	if abort:
+		raise AssertionError('Alternating gaze should not abort without seven consecutive outside samples')
+
+
 def build_session():
 	part12_trials = build_interleaved_stair_trials('Part1', PART1_TRIAL_SPECS)
 	part3_trials = build_interleaved_stair_trials('Part2', PART2_TRIAL_SPECS)
@@ -1647,6 +1881,13 @@ def run_checks_and_report(trials_by_part):
 	except Exception as exc:
 		part2_motion_ok = False
 		part2_motion_error = str(exc)
+	fixation_monitor_ok = True
+	fixation_monitor_error = None
+	try:
+		validate_fixation_monitoring_logic()
+	except Exception as exc:
+		fixation_monitor_ok = False
+		fixation_monitor_error = str(exc)
 
 	# Trial counts
 	counts = {k: len(v) for k, v in trials_by_part.items()}
@@ -1678,6 +1919,9 @@ def run_checks_and_report(trials_by_part):
 	print('Part 2 polar-motion validation passed:', part2_motion_ok)
 	if not part2_motion_ok:
 		print('  Part 2 validation error:', part2_motion_error)
+	print('Fixation/tracking-loss validation passed:', fixation_monitor_ok)
+	if not fixation_monitor_ok:
+		print('  Fixation validation error:', fixation_monitor_error)
 	for pname in counts:
 		expected = expected_part_counts[pname]
 		print(f"{pname}: {counts[pname]} trials (expected {expected})")
@@ -1718,6 +1962,8 @@ def run_checks_and_report(trials_by_part):
 		issues.append('Circular radius not 6 deg')
 	if not part2_motion_ok:
 		issues.append(part2_motion_error or 'Part 2 motion validation failed')
+	if not fixation_monitor_ok:
+		issues.append(fixation_monitor_error or 'Fixation monitoring validation failed')
 
 	if issues:
 		print('\nIssues detected:')
@@ -1853,6 +2099,7 @@ if __name__ == '__main__':
 		wrapWidth=34,
 		autoLog=False,
 	)
+	fixationWarningThreshold = max(1, int(EYE['fix_break_consec_frames']))
 	blobStim = visual.Circle(myWin, radius=0.6, fillColor=(1, -1, -1), lineColor=None)
 	blobStim2 = visual.Circle(myWin, radius=0.6, fillColor=(-1, 1, -1), lineColor=None)
 	myWin.mouseVisible = True
@@ -1882,6 +2129,7 @@ if __name__ == '__main__':
 				'',
 				'Press Escape here when calibration is complete.',
 			],
+			key_list=['escape'],
 		)
 		tracker.calibrate()
 
@@ -1927,7 +2175,7 @@ if __name__ == '__main__':
 		'trialnum', 'subject', 'session', 'part', 'condition', 'basicShape', 'numObjects', 'speed', 'motionRule', 'trialKind',
 		'staircaseIndex', 'staircaseWithinCondition', 'stairKey', 'stairStartSpeed', 'stairValue',
 		'initialAngle', 'initialOtherAngle', 'cueFrames', 'timingCheckFrames',
-		'eyetrackingEnabled', 'fixatnPeriodFrames', 'trajectorySide', 'trajectoryOffsetDeg', 'ellipseRotationRad', 'correct', 'trialOutcome', 'trialExcluded', 'fixBreakFrame', 'fixBreakDistanceDeg', 'trialDurTotal', 'numTargets', 'whichIsTarget',
+		'eyetrackingEnabled', 'fixatnPeriodFrames', 'trajectorySide', 'trajectoryOffsetDeg', 'ellipseRotationRad', 'correct', 'trialOutcome', 'trialExcluded', 'retryCount', 'fixationCountPhase', 'trackingLossFlag', 'totalTrackingLostFrames', 'maxConsecutiveTrackingLostFrames', 'trackingLossEvents', 'firstTrackingLossFrame', 'lastTrackingLossFrame', 'consecutiveOutsideFramesAtAbort', 'fixBreakFrame', 'fixBreakDistanceDeg', 'trialDurTotal', 'numTargets', 'whichIsTarget', 'clickDistanceToTargetDeg', 'clickDistanceToDistractorDeg',
 		'reversal_count', 'timingBlips', 'numLongFramesAfterCue'
 	]
 	# add reversal columns
@@ -1971,9 +2219,11 @@ if __name__ == '__main__':
 			return
 		# wait until space is pressed
 		while True:
-			keys = kb.getKeys(keyList=['space', 'escape'], waitRelease=False, clear=True)
-			if keys and keys[0].name == 'escape':
+			keys = kb.getKeys(keyList=['space', 'escape', 'q'], waitRelease=False, clear=True)
+			if keys and keys[0].name == 'q':
 				core.quit()
+			if keys and keys[0].name == 'escape':
+				break
 			if keys and keys[0].name == 'space':
 				core.wait(0.1)
 				break
@@ -2015,6 +2265,7 @@ if __name__ == '__main__':
 	def run_part(part_name, trial_list):
 		print(f"Running {part_name} with {len(trial_list)} trials")
 		offset_side_counts = {'left': 0, 'right': 0}
+		pending_trials = deque(trial_list)
 		
 		# Build and run practice trials first
 		part_specs = get_part_trial_specs(part_name)
@@ -2083,12 +2334,13 @@ if __name__ == '__main__':
 					trialnum = len(results)
 					trial_start_time = trialClock.getTime()
 					ts = []
+					trial_excluded = 0
+					fixation_abort = False
 					trial_outcome = 'ok'
 					fix_break_frame = -999
 					fix_break_distance_deg = -999.0
 					prev_sample = None
-					last_in_window = True
-					consecutive_invalid = 0
+					fix_state = make_fixation_monitor_state()
 					fixatnMinDur = 0.8
 					fixatnVariableDur = 0.5
 					fixatnPeriodFrames = int((fixatnMinDur + random.random() * fixatnVariableDur) * refreshRate)
@@ -2097,12 +2349,20 @@ if __name__ == '__main__':
 					tracker.send_message(f'trial_start={trialnum}')
 					tracker.send_message(f'trialDurTotal={trialDurTotal}')
 					tracker.send_message(f'fixation_period_frames={fixatnPeriodFrames}')
+					trial_outcome = 'ok'
+					fix_break_frame = -999
+					fix_break_distance_deg = -999.0
+					prev_sample = None
 					for fix_frame in range(fixatnPeriodFrames):
 						draw_center_fixation(myWin, fixation, fixationBlank, fixationPoint, fix_frame)
+						fix_broke, prev_sample, gaze_status, dist_deg, fix_state = update_fixation_monitor(
+							tracker, prev_sample, fix_state, count_motion_frames=False, frame_idx=fix_frame, trialnum=trialnum, tracker=tracker
+						)
 						myWin.flip()
+					reset_fixation_monitor_for_motion(fix_state)
 					tracker.send_message(f'fixation_complete_trial={trialnum}')
 					tracker.send_message(f'Fixation pre-stimulus period of {fixatnPeriodFrames * refreshRate} now ending for trialnum={trialnum}')
-					
+				
 					# Frame loop (identical to main loop)
 					part2_motion_log_enabled = (
 						part_name == 'Part2'
@@ -2151,16 +2411,21 @@ if __name__ == '__main__':
 								prev_motion_theta = currTargetAngle
 								prev_motion_xy = (x1, y1)
 
-						fix_broke, prev_sample, last_in_window, consecutive_invalid, dist_deg = update_fixation_monitor(
-							tracker, prev_sample, last_in_window, consecutive_invalid
+						fix_broke, prev_sample, gaze_status, dist_deg, fix_state = update_fixation_monitor(
+							tracker, prev_sample, fix_state, count_motion_frames=True, frame_idx=frameN, trialnum=trialnum, tracker=tracker
 						)
+						if gaze_status == 'outside_window' and not fix_broke:
+							fixationWarningText.draw()
 						if fix_broke:
 							if trial_outcome == 'ok':
-								trial_outcome = 'fixation_warning'
+								trial_outcome = 'fixation_abort'
+							trial_excluded = 1
 							if fix_break_frame == -999:
 								fix_break_frame = frameN
 								fix_break_distance_deg = float(dist_deg if dist_deg is not None else -999.0)
-						
+							fixation_abort = True
+							break
+
 						if next_reversal_idx < len(reversal_times) and timeSec > reversal_times[next_reversal_idx]:
 							direction *= -1
 							next_reversal_idx += 1
@@ -2193,12 +2458,13 @@ if __name__ == '__main__':
 						blobStim2.setLineColor(None, log=False)
 						blobStim.setPos((x1, y1)); blobStim.draw()
 						blobStim2.setPos((x2, y2)); blobStim2.draw()
-						if fix_broke:
-							fixationWarningText.draw()
 						
 						myWin.flip()
 						ts.append(trialClock.getTime() - trial_start_time)
+					finalize_tracking_loss_event(fix_state, trialnum=trialnum, tracker=tracker, final_frame=trialDurFrames - 1)
 					
+					tracker.send_message(f'MOTION_OFFSET ok trial={trialnum}')
+					tracker.stop_recording(trialnum, result_code=0)
 					tracker.send_message(f'response_prompt_trial={trialnum}')
 					# Response collection
 					resp = None
@@ -2209,6 +2475,9 @@ if __name__ == '__main__':
 					except Exception:
 						myWin.mouseVisible = True
 					clicked = False
+					response_choice_radius = float(getattr(blobStim, 'radius', 0.6))
+					click_distance_to_target_deg = -999.0
+					click_distance_to_distractor_deg = -999.0
 					if autoAdvance:
 						clicked = True
 						correct = True
@@ -2236,14 +2505,24 @@ if __name__ == '__main__':
 							myWin.flip()
 							if mouse.getPressed()[0]:
 								mx, my = mouse.getPos()
-								d1 = (mx - x1) ** 2 + (my - y1) ** 2
-								d2 = (mx - x2) ** 2 + (my - y2) ** 2
-								picked = 0 if d1 < d2 else 1
+								picked, d1, d2, target_hit, distractor_hit = score_click_response(
+									mx, my, x1, y1, x2, y2, response_choice_radius
+								)
+								click_distance_to_target_deg = float(np.sqrt(d1))
+								click_distance_to_distractor_deg = float(np.sqrt(d2))
 								correct = (picked == target_idx)
+								if not correct:
+									print(
+										f'RESPONSE_MISS practice trial={trialnum} part={part_name} condition={cond} '
+										f'picked={picked} target={target_idx} d1={d1:.3f} d2={d2:.3f} '
+										f'targetHit={target_hit} distractorHit={distractor_hit} radius={response_choice_radius:.3f} '
+										f'clickTargetDeg={click_distance_to_target_deg:.3f} clickDistractorDeg={click_distance_to_distractor_deg:.3f} '
+										f'mouse=({mx:.3f},{my:.3f}) x1=({x1:.3f},{y1:.3f}) x2=({x2:.3f},{y2:.3f})'
+									)
 								clicked = True
 								break
 							keys = event.getKeys()
-							if 'escape' in keys:
+							if 'q' in keys:
 								core.quit()
 					
 					# Feedback
@@ -2270,24 +2549,24 @@ if __name__ == '__main__':
 					num_long_frames_after_cue = int(np.sum(long_frame_indices >= timingCheckFrames))
 					
 					tracker.send_message(f'trial_end={trialnum}')
-					tracker.stop_recording()
 					# Write practice trial to TSV
 					trialDurTotal = trialClock.getTime() - trial_start_time
 					reversal_str = '\t'.join([str(round(r, 4)) for r in reversal_times])
 					if len(reversal_times) < 10:
 						reversal_str += '\t' + '\t'.join(['-999'] * (10 - len(reversal_times)))
 					
+					tracking_loss_flag, total_tracking_lost_frames, max_consecutive_tracking_lost_frames, tracking_loss_events, first_tracking_loss_frame, last_tracking_loss_frame, consecutive_outside_frames_at_abort = fixation_monitor_summary_fields(fix_state, fixation_abort=fixation_abort)
 					print(trialnum, subject, session, part_name, cond, basicShape, 2, speed, motion_rule, 'practice',
 						  0, 'n/a', '-999', -999, -999,
 						  round(initialAngle, 4), round(initialOtherAngle, 4),
 						  cueFrames, timingCheckFrames,
 							int(tracker.is_active()), fixatnPeriodFrames, trajectory_side, round(abs(offset_deg), 4), round(float(ellipse_rotation_rad), 4) if ellipse_rotation_rad is not None else -999,
-							trial_outcome, 0, fix_break_frame, round(float(fix_break_distance_deg), 4), round(trialDurTotal, 3), 1, target_idx,
+						bool(correct), trial_outcome, trial_excluded, 0, 'motion_only', tracking_loss_flag, total_tracking_lost_frames, max_consecutive_tracking_lost_frames, tracking_loss_events, first_tracking_loss_frame, last_tracking_loss_frame, consecutive_outside_frames_at_abort, fix_break_frame, round(float(fix_break_distance_deg), 4), round(trialDurTotal, 3), 1, target_idx, round(click_distance_to_target_deg, 4), round(click_distance_to_distractor_deg, 4),
 					      len(reversal_times), timing_blips, num_long_frames_after_cue,
 						  sep='\t', end='\t', file=dataFile)
 					print(reversal_str, file=dataFile)
 					dataFile.flush()
-					results.append({'part': part_name, 'condition': cond, 'motionRule': motion_rule, 'trialKind': 'practice', 'speed': speed, 'stairValue': -999, 'staircaseIndex': 0, 'staircaseWithinCondition': 'n/a', 'stairKey': '-999', 'correct': bool(correct), 'trajectorySide': trajectory_side, 'trajectoryOffsetDeg': round(abs(offset_deg), 4)})
+					results.append({'part': part_name, 'condition': cond, 'motionRule': motion_rule, 'trialKind': 'practice', 'speed': speed, 'stairValue': -999, 'staircaseIndex': 0, 'staircaseWithinCondition': 'n/a', 'stairKey': '-999', 'correct': bool(correct), 'retryCount': 0, 'trackingLossFlag': tracking_loss_flag, 'trajectorySide': trajectory_side, 'trajectoryOffsetDeg': round(abs(offset_deg), 4)})
 			
 				restart_practice = False
 				practice_done_text = visual.TextStim(
@@ -2297,19 +2576,25 @@ if __name__ == '__main__':
 					height=0.8,
 					wrapWidth=40,
 				)
+				activate_window(myWin)
 				practice_done_text.draw()
 				myWin.flip()
 				if autoAdvance:
 					core.wait(0.75)
 					break
+				kb = keyboard.Keyboard()
 				while True:
-					keys = event.getKeys(keyList=['r', 'space', 'spacebar'])
-					if 'r' in keys:
-						practice_round += 1
-						restart_practice = True
-						break
-					if 'space' in keys or 'spacebar' in keys:
-						break
+					keys = kb.getKeys(keyList=['r', 'space', 'spacebar', 'q'], waitRelease=False, clear=True)
+					if keys:
+						key_name = keys[0].name
+						if key_name == 'q':
+							core.quit()
+						if key_name == 'r':
+							practice_round += 1
+							restart_practice = True
+							break
+						if key_name in ('space', 'spacebar'):
+							break
 					core.wait(0.01)
 				if not restart_practice:
 					break
@@ -2325,7 +2610,9 @@ if __name__ == '__main__':
 		# Track how many trials have been completed within this part so the 100-trial
 		# break schedule resets at the start of each part.
 		start_index = len(results)
-		for ti, thisTrial in enumerate(trial_list):
+		while pending_trials:
+			thisTrial = pending_trials.popleft()
+			ti = len(results) - start_index
 			# insert scheduled break every 100 completed trials WITHIN this part
 			completed_in_part = len(results) - start_index
 			if completed_in_part > 0 and completed_in_part % 100 == 0:
@@ -2392,23 +2679,55 @@ if __name__ == '__main__':
 			fixatnVariableDur = 0.5
 			fixatnPeriodFrames = int((fixatnMinDur + random.random() * fixatnVariableDur) * refreshRate)
 			trialDurTotal = trialDurFrames / refreshRate
+			trial_excluded = 0
+			fixation_abort = False
+			fix_state = make_fixation_monitor_state()
 			tracker.start_recording(trialnum, calib_trial=(trialnum == 0), widthPix=widthPix, heightPix=heightPix)
 			tracker.send_message(f'trial_start={trialnum}')
 			tracker.send_message(f'trialDurTotal={trialDurTotal}')
 			tracker.send_message(f'fixation_period_frames={fixatnPeriodFrames}')
-			for fix_frame in range(fixatnPeriodFrames):
-				draw_center_fixation(myWin, fixation, fixationBlank, fixationPoint, fix_frame)
-				myWin.flip()
-			tracker.send_message(f'fixation_complete_trial={trialnum}')
-			tracker.send_message(f'Fixation pre-stimulus period of {fixatnPeriodFrames * refreshRate} now ending for trialnum={trialnum}')
-
-			# frame loop
 			trial_outcome = 'ok'
 			fix_break_frame = -999
 			fix_break_distance_deg = -999.0
 			prev_sample = None
-			last_in_window = True
-			consecutive_invalid = 0
+			for fix_frame in range(fixatnPeriodFrames):
+				draw_center_fixation(myWin, fixation, fixationBlank, fixationPoint, fix_frame)
+				fix_broke, prev_sample, gaze_status, dist_deg, fix_state = update_fixation_monitor(
+					tracker, prev_sample, fix_state, count_motion_frames=False, frame_idx=fix_frame, trialnum=trialnum, tracker=tracker
+				)
+				myWin.flip()
+			reset_fixation_monitor_for_motion(fix_state)
+			tracker.send_message(f'fixation_complete_trial={trialnum}')
+			tracker.send_message(f'Fixation pre-stimulus period of {fixatnPeriodFrames * refreshRate} now ending for trialnum={trialnum}')
+			if fixation_abort:
+				tracker.send_message(f'trial_abort=fixation trial={trialnum}')
+				tracker.stop_recording()
+				show_brief_message(myWin, 'Fixation broken!', duration_sec=0.9, color='orange')
+				for _ in range(int(0.5 * refreshRate)):
+					draw_center_fixation(myWin, fixation, fixationBlank, fixationPoint)
+					myWin.flip()
+				trialDurTotal = trialClock.getTime() - trial_start_time
+				retry_count = int(thisTrial.get('_retry_count', 0))
+				tracking_loss_flag, total_tracking_lost_frames, max_consecutive_tracking_lost_frames, tracking_loss_events, first_tracking_loss_frame, last_tracking_loss_frame, consecutive_outside_frames_at_abort = fixation_monitor_summary_fields(fix_state, fixation_abort=fixation_abort)
+				reversal_str = '\t'.join([str(round(r, 4)) for r in reversal_times])
+				if len(reversal_times) < 10:
+					reversal_str += '\t' + '\t'.join(['-999'] * (10 - len(reversal_times)))
+				print(trialnum, subject, session, part_name, cond, basicShape, 2, speed, motion_rule, trial_kind,
+					  staircase_index, staircase_label, stair_key, stair_start_speed, stair_value,
+					  round(initialAngle, 4), round(initialOtherAngle, 4),
+					  cueFrames, timingCheckFrames,
+						int(tracker.is_active()), fixatnPeriodFrames, trajectory_side, round(abs(offset_deg), 4), round(float(ellipse_rotation_rad), 4) if ellipse_rotation_rad is not None else -999,
+						False, trial_outcome, trial_excluded, retry_count, 'motion_only', tracking_loss_flag, total_tracking_lost_frames, max_consecutive_tracking_lost_frames, tracking_loss_events, first_tracking_loss_frame, last_tracking_loss_frame, consecutive_outside_frames_at_abort, fix_break_frame, round(float(fix_break_distance_deg), 4), round(trialDurTotal, 3), 1, target_idx, round(-999.0, 4), round(-999.0, 4),
+					  len(reversal_times), 0, 0,
+					  sep='\t', end='\t', file=dataFile)
+				print(reversal_str, file=dataFile)
+				dataFile.flush()
+				thisTrial['_retry_count'] = int(thisTrial.get('_retry_count', 0)) + 1
+				pending_trials.append(thisTrial)
+				results.append({'part': part_name, 'condition': cond, 'motionRule': motion_rule, 'trialKind': trial_kind, 'speed': speed, 'stairValue': stair_value, 'staircaseIndex': staircase_index, 'staircaseWithinCondition': staircase_label, 'stairKey': stair_key, 'correct': False, 'excluded': True, 'retryCount': retry_count, 'trackingLossFlag': tracking_loss_flag, 'trajectorySide': trajectory_side, 'trajectoryOffsetDeg': round(abs(offset_deg), 4)})
+				continue
+
+			# frame loop
 			part2_motion_log_enabled = (
 				part_name == 'Part2'
 				and trial_kind != 'staircase'
@@ -2480,15 +2799,19 @@ if __name__ == '__main__':
 						prev_motion_theta = currTargetAngle
 						prev_motion_xy = (x1, y1)
 
-						fix_broke, prev_sample, last_in_window, consecutive_invalid, dist_deg = update_fixation_monitor(
-							tracker, prev_sample, last_in_window, consecutive_invalid
-						)
-						if fix_broke:
-							if trial_outcome == 'ok':
-								trial_outcome = 'fixation_warning'
-							if fix_break_frame == -999:
-								fix_break_frame = frameN
-								fix_break_distance_deg = float(dist_deg if dist_deg is not None else -999.0)
+				fix_broke, prev_sample, gaze_status, dist_deg, fix_state = update_fixation_monitor(
+					tracker, prev_sample, fix_state, count_motion_frames=True, frame_idx=frameN, trialnum=trialnum, tracker=tracker
+				)
+				if gaze_status == 'outside_window' and not fix_broke:
+					fixationWarningText.draw()
+				if fix_broke:
+					trial_outcome = 'fixation_abort'
+					trial_excluded = 1
+					if fix_break_frame == -999:
+						fix_break_frame = frameN
+						fix_break_distance_deg = float(dist_deg if dist_deg is not None else -999.0)
+					fixation_abort = True
+					break
 
 				if next_reversal_idx < len(reversal_times) and timeSec > reversal_times[next_reversal_idx]:
 					direction *= -1
@@ -2527,12 +2850,39 @@ if __name__ == '__main__':
 				blobStim2.setLineColor(None, log=False)
 				blobStim.setPos((x1, y1)); blobStim.draw()
 				blobStim2.setPos((x2, y2)); blobStim2.draw()
-				if fix_broke:
-					fixationWarningText.draw()
-
 				myWin.flip()
 				ts.append(trialClock.getTime() - trial_start_time)
 
+			finalize_tracking_loss_event(fix_state, trialnum=trialnum, tracker=tracker, final_frame=trialDurFrames - 1)
+
+			if fixation_abort:
+				tracker.send_message(f'trial_abort=fixation trial={trialnum}')
+				tracker.stop_recording()
+				show_brief_message(myWin, 'Fixation broken!', duration_sec=0.9, color='orange')
+				for _ in range(int(0.5 * refreshRate)):
+					draw_center_fixation(myWin, fixation, fixationBlank, fixationPoint)
+					myWin.flip()
+				trialDurTotal = trialClock.getTime() - trial_start_time
+				reversal_str = '\t'.join([str(round(r, 4)) for r in reversal_times])
+				if len(reversal_times) < 10:
+					reversal_str += '\t' + '\t'.join(['-999'] * (10 - len(reversal_times)))
+				print(trialnum, subject, session, part_name, cond, basicShape, 2, speed, motion_rule, trial_kind,
+					  staircase_index, staircase_label, stair_key, stair_start_speed, stair_value,
+					  round(initialAngle, 4), round(initialOtherAngle, 4),
+					  cueFrames, timingCheckFrames,
+						int(tracker.is_active()), fixatnPeriodFrames, trajectory_side, round(abs(offset_deg), 4), round(float(ellipse_rotation_rad), 4) if ellipse_rotation_rad is not None else -999,
+						False, trial_outcome, trial_excluded, fix_break_frame, round(float(fix_break_distance_deg), 4), round(trialDurTotal, 3), 1, target_idx, round(-999.0, 4), round(-999.0, 4),
+					  len(reversal_times), timing_blips, num_long_frames_after_cue,
+					  sep='\t', end='\t', file=dataFile)
+				print(reversal_str, file=dataFile)
+				dataFile.flush()
+				thisTrial['_retry_count'] = int(thisTrial.get('_retry_count', 0)) + 1
+				pending_trials.append(thisTrial)
+				results.append({'part': part_name, 'condition': cond, 'motionRule': motion_rule, 'trialKind': trial_kind, 'speed': speed, 'stairValue': stair_value, 'staircaseIndex': staircase_index, 'staircaseWithinCondition': staircase_label, 'stairKey': stair_key, 'correct': False, 'excluded': True, 'trajectorySide': trajectory_side, 'trajectoryOffsetDeg': round(abs(offset_deg), 4)})
+				continue
+
+			tracker.send_message(f'MOTION_OFFSET ok trial={trialnum}')
+			tracker.stop_recording(trialnum, result_code=0)
 			tracker.send_message(f'response_prompt_trial={trialnum}')
 			# response collection: ask participant to click the target
 			# draw the objects continuously while waiting so they remain visible
@@ -2544,6 +2894,15 @@ if __name__ == '__main__':
 			except Exception:
 				myWin.mouseVisible = True
 			clicked = False
+			response_choice_radius = float(getattr(blobStim, 'radius', 0.6))
+			click_distance_to_target_deg = -999.0
+			click_distance_to_distractor_deg = -999.0
+			activate_window(myWin)
+			event.clearEvents(eventType='keyboard')
+			try:
+				mouse.clickReset()
+			except Exception:
+				pass
 			if autoAdvance:
 				clicked = True
 				correct = True
@@ -2570,18 +2929,28 @@ if __name__ == '__main__':
 					blobStim2.setPos((x2, y2)); blobStim2.draw()
 					draw_trajectory(myWin, basicShape, radii[0], cx, cy)
 					myWin.flip()
+					keys = event.getKeys(keyList=['q'])
+					if 'q' in keys:
+						core.quit()
 					if mouse.getPressed()[0]:
 						mx, my = mouse.getPos()
-						# determine which object was closer
-						d1 = (mx - x1) ** 2 + (my - y1) ** 2
-						d2 = (mx - x2) ** 2 + (my - y2) ** 2
-						picked = 0 if d1 < d2 else 1
+						picked, d1, d2, target_hit, distractor_hit = score_click_response(
+							mx, my, x1, y1, x2, y2, response_choice_radius
+						)
+						click_distance_to_target_deg = float(np.sqrt(d1))
+						click_distance_to_distractor_deg = float(np.sqrt(d2))
 						correct = (picked == target_idx)
+						if not correct:
+							print(
+								f'RESPONSE_MISS main trial={trialnum} part={part_name} condition={cond} '
+								f'picked={picked} target={target_idx} d1={d1:.3f} d2={d2:.3f} '
+								f'targetHit={target_hit} distractorHit={distractor_hit} radius={response_choice_radius:.3f} '
+								f'clickTargetDeg={click_distance_to_target_deg:.3f} clickDistractorDeg={click_distance_to_distractor_deg:.3f} '
+								f'mouse=({mx:.3f},{my:.3f}) x1=({x1:.3f},{y1:.3f}) x2=({x2:.3f},{y2:.3f})'
+							)
 						clicked = True
 						break
-						keys = event.getKeys()
-						if 'escape' in keys:
-							core.quit()
+						core.wait(0.001)
 
 			# feedback: play sound and visual flash
 			if clicked:
@@ -2636,6 +3005,8 @@ if __name__ == '__main__':
 			reversal_str = '\t'.join([str(round(r, 4)) for r in reversal_times])
 			if len(reversal_times) < 10:
 				reversal_str += '\t' + '\t'.join(['-999'] * (10 - len(reversal_times)))
+			retry_count = int(thisTrial.get('_retry_count', 0))
+			tracking_loss_flag, total_tracking_lost_frames, max_consecutive_tracking_lost_frames, tracking_loss_events, first_tracking_loss_frame, last_tracking_loss_frame, consecutive_outside_frames_at_abort = fixation_monitor_summary_fields(fix_state, fixation_abort=fixation_abort)
 			
 			# Write all trial data
 			print(trialnum, subject, session, part_name, cond, basicShape, 2, speed, motion_rule, trial_kind,
@@ -2643,12 +3014,12 @@ if __name__ == '__main__':
 				  round(initialAngle, 4), round(initialOtherAngle, 4),
 				  cueFrames, timingCheckFrames,
 					int(tracker.is_active()), fixatnPeriodFrames, trajectory_side, round(abs(offset_deg), 4), round(float(ellipse_rotation_rad), 4) if ellipse_rotation_rad is not None else -999,
-					trial_outcome, 0, fix_break_frame, round(float(fix_break_distance_deg), 4), round(trialDurTotal, 3), 1, target_idx,
+					bool(correct), trial_outcome, 0, retry_count, 'motion_only', tracking_loss_flag, total_tracking_lost_frames, max_consecutive_tracking_lost_frames, tracking_loss_events, first_tracking_loss_frame, last_tracking_loss_frame, consecutive_outside_frames_at_abort, fix_break_frame, round(float(fix_break_distance_deg), 4), round(trialDurTotal, 3), 1, target_idx, round(click_distance_to_target_deg, 4), round(click_distance_to_distractor_deg, 4),
 				  len(reversal_times), timing_blips, num_long_frames_after_cue,
 				  sep='\t', end='\t', file=dataFile)
 			print(reversal_str, file=dataFile)
 			dataFile.flush()
-			results.append({'part': part_name, 'condition': cond, 'motionRule': motion_rule, 'trialKind': trial_kind, 'speed': speed, 'stairValue': stair_value, 'staircaseIndex': staircase_index, 'staircaseWithinCondition': staircase_label, 'stairKey': stair_key, 'correct': bool(correct), 'trajectorySide': trajectory_side, 'trajectoryOffsetDeg': round(abs(offset_deg), 4)})
+			results.append({'part': part_name, 'condition': cond, 'motionRule': motion_rule, 'trialKind': trial_kind, 'speed': speed, 'stairValue': stair_value, 'staircaseIndex': staircase_index, 'staircaseWithinCondition': staircase_label, 'stairKey': stair_key, 'correct': bool(correct), 'retryCount': retry_count, 'trackingLossFlag': tracking_loss_flag, 'trajectorySide': trajectory_side, 'trajectoryOffsetDeg': round(abs(offset_deg), 4)})
 
 	part_run_order = ['part2', 'part1'] if reverseOrder else ['part1', 'part2']
 	parts_to_run_set = set(parts_to_run)
